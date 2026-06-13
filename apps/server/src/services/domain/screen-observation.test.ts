@@ -70,7 +70,7 @@ describe('screen observation domain contract', () => {
     })).toBe('suppressed_meeting')
   })
 
-  it('normalizes screenpipe summaries without raw OCR or screenshot fields', () => {
+  it('normalizes observation summaries, clamping out-of-range confidence and observedSeconds', () => {
     const summary = normalizeScreenObserverSummary({
       id: 'summary-1',
       capturedAt: now.toISOString(),
@@ -96,7 +96,7 @@ describe('screen observation domain contract', () => {
     })
 
     expect(summary).toMatchObject({
-      source: 'screenpipe',
+      source: 'minecontext',
       confidence: 0,
       apps: [{ observedSeconds: 0 }],
       taskSignals: [{ confidence: 1 }],

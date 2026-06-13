@@ -108,7 +108,8 @@ export interface ScreenObserverSummary {
   capturedAt: string
   windowStartedAt: string
   windowEndedAt: string
-  source: 'screenpipe'
+  /** Observation backend that produced this summary. */
+  source: 'screenpipe' | 'minecontext'
   privacyState: ScreenObserverPrivacyState
   apps: ScreenObserverAppSummary[]
   taskSignals: ScreenObserverTaskSignal[]
@@ -244,6 +245,7 @@ export interface NormalizeSummaryInput {
   capturedAt: string
   windowStartedAt: string
   windowEndedAt: string
+  source?: ScreenObserverSummary['source']
   privacyState: ScreenObserverPrivacyState
   apps?: ScreenObserverAppSummary[]
   taskSignals?: ScreenObserverTaskSignal[]
@@ -372,7 +374,7 @@ export function resolveObservationPrivacyState(input: ObservationStateInput): Sc
 }
 
 /**
- * Normalizes screenpipe-derived summaries before they enter task reasoning.
+ * Normalizes observation summaries before they enter task reasoning.
  *
  * The summary contract intentionally carries app/time/evidence summaries, not
  * screenshots or raw OCR text.
@@ -384,7 +386,7 @@ export function normalizeScreenObserverSummary(input: NormalizeSummaryInput): Sc
     capturedAt: input.capturedAt,
     windowStartedAt: input.windowStartedAt,
     windowEndedAt: input.windowEndedAt,
-    source: 'screenpipe',
+    source: input.source ?? 'minecontext',
     privacyState: input.privacyState,
     apps: (input.apps ?? []).map(app => ({
       ...app,

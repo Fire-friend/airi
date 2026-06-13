@@ -77,8 +77,8 @@ export interface RuntimeObservationState {
   privacyState: ScreenObserverPrivacyState
   /** ISO timestamp until which observation is manually paused, if any. */
   pauseUntil?: string
-  /** Whether the local screenpipe service responded to the last health check. */
-  screenpipeAvailable?: boolean
+  /** Whether the local observation source (MineContext) responded to the last health check. */
+  observationSourceAvailable?: boolean
   /** Tasks registered with the runtime's decide loop; omitted payloads keep the current list. */
   tasks?: Task[]
 }
@@ -108,7 +108,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
   const latestDailySummary = ref<DailySummaryPayload>()
   const pauseUntil = ref<string>()
   const snapshotPrivacyState = ref<ScreenObserverPrivacyState>()
-  const screenpipeAvailable = ref<boolean>()
+  const observationSourceAvailable = ref<boolean>()
 
   const privacyState = computed<ScreenObserverPrivacyState>(() =>
     snapshotPrivacyState.value ?? provisionalPrivacyState({
@@ -148,7 +148,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     applySettings(state.settings)
     pauseUntil.value = state.pauseUntil
     snapshotPrivacyState.value = state.privacyState
-    screenpipeAvailable.value = state.screenpipeAvailable
+    observationSourceAvailable.value = state.observationSourceAvailable
     if (state.tasks)
       tasks.value = state.tasks
   }
@@ -183,7 +183,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     latestDailySummary.value = undefined
     pauseUntil.value = undefined
     snapshotPrivacyState.value = undefined
-    screenpipeAvailable.value = undefined
+    observationSourceAvailable.value = undefined
   }
 
   return {
@@ -203,7 +203,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     privacyState,
     isEffectivelyObserving,
     statusLabelKey,
-    screenpipeAvailable,
+    observationSourceAvailable,
     applySnapshot,
     applyRuntimeState,
     applySummary,

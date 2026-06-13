@@ -12,8 +12,8 @@ import type { BaseIssue, BaseSchema, InferOutput } from 'valibot'
 import type { ScreenObservationRuntimeState } from '../../../../shared/eventa/screen-observation'
 import type { I18n } from '../../../libs/i18n'
 import type { NoticeWindowManager } from '../../../windows/notice'
+import type { MineContextClient } from './minecontext'
 import type { TouchInteractionLedgerEntry, TouchOutcome } from './runtime'
-import type { ScreenpipeClient } from './screenpipe'
 
 import { randomUUID } from 'node:crypto'
 
@@ -50,14 +50,14 @@ import {
   recordTouchPresented,
   shouldCaptureScreen,
 } from './runtime'
-import { aggregateAppSummaries, createScreenpipeClient } from './screenpipe'
+import { aggregateContextActivities, createMineContextClient } from './minecontext'
 
 type EventaContext = ReturnType<typeof createContext>['context']
 
 /**
- * How often the observer re-evaluates suppression signals and pulls a new
- * OCR window from screenpipe. 30s keeps summaries fresh enough for progress
- * tracking while staying far below screenpipe's own capture cadence.
+ * How often the observer re-evaluates suppression signals and polls MineContext
+ * for new activity contexts. 30s keeps the runtime responsive to MineContext
+ * updates even though MineContext generates activities on a 10-minute cadence.
  */
 const POLL_INTERVAL_MS = 30 * 1000
 
@@ -213,8 +213,8 @@ export interface SetupScreenObserverOptions {
   i18n: I18n
   /** Presents L2 task-touch toasts and reports the chosen action (frozen renderer seam). */
   noticeWindow: Pick<NoticeWindowManager, 'openTaskTouch'>
-  /** Injected for tests; defaults to a localhost screenpipe client. */
-  screenpipe?: ScreenpipeClient
+  /** Injected for tests; defaults to a localhost MineContext client. */
+  minecontext?: MineContextClient
 }
 
 /**
@@ -225,7 +225,7 @@ export interface SetupScreenObserverOptions {
  *   exist per app.
  *
  * Expects:
- * - screenpipe may be absent; the runtime degrades to `screenpipeAvailable:
+ * - MineContext may be absent; the runtime degrades to `observationSourceAvailable:
  *   false` and keeps re-checking on each poll tick.
  *
  * Returns:
@@ -235,10 +235,10 @@ export interface SetupScreenObserverOptions {
  * Call stack:
  *
  * setupScreenObserver (main composition root)
- *   -> {@link createScreenpipeClient}
+ *   -> {@link createMineContextClient}
  *   -> poll tick
  *     -> resolveObservationPrivacyState (@proj-airi/server-sdk-shared) / {@link shouldCaptureScreen}
- *     -> {@link aggregateAppSummaries}
+ *     -> {@link aggregateContextActivities}
  *     -> broadcast {@link electronScreenObservationSummaryCaptured}
  */
 export function setupScreenObserver(options: SetupScreenObserverOptions): ScreenObserverService {
@@ -255,14 +255,14 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   const openTaskDetailsListeners = new Set<(taskId: string) => void>()
 
   const suppression = { isFullscreen: false, isMeeting: false }
-  let screenpipeAvailable = false
+  let observationSourceAvailable = false
   let latestSummaryAt: string | undefined
   let lastCaptureEndedAt: Date | undefined
   let registeredAccelerator: string | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let ticking = false
 
-  const screenpipe = options.screenpipe ?? createScreenpipeClient()
+  const minecontext = options.minecontext ?? createMineContextClient()
 
   function getConfig(): ScreenObservationConfig {
     return config.get() ?? {}
@@ -297,7 +297,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       privacyState,
       pauseUntil: privacyState === 'paused' ? stored.pauseUntil : undefined,
       suppression: { ...suppression },
-      screenpipeAvailable,
+      observationSourceAvailable,
       latestSummaryAt,
       tasks: Object.values(stored.tasks ?? {}),
     }
@@ -374,22 +374,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     const { settings, privacyState } = lastBroadcastState
     const windowStart = lastCaptureEndedAt ?? new Date(now.getTime() - POLL_INTERVAL_MS)
 
-    // One query per whitelisted app: non-whitelisted apps' OCR text is never
-    // pulled into this process, which keeps the whitelist a hard boundary
-    // instead of a post-hoc filter.
-    const results = await Promise.all(settings.allowedApps.map(appName => screenpipe.searchOcr({
-      appName,
-      startTime: windowStart.toISOString(),
-      endTime: now.toISOString(),
-    })))
+    const activities = await minecontext.getActivities({ since: windowStart })
 
-    // The waterline advances even when a window came back partial (page cap
-    // hit during a long catch-up): the summary is marked partial below
-    // instead of re-fetching the same window forever.
+    // Waterline advances even when no activities arrived: avoids re-querying
+    // the same window and accumulating stale contexts on the next tick.
     lastCaptureEndedAt = now
-    const partial = results.some(result => !result.complete)
 
-    const apps = aggregateAppSummaries(results.flatMap(result => result.items), settings.allowedApps)
+    const apps = aggregateContextActivities(activities, settings.allowedApps)
     if (apps.length === 0)
       return undefined
 
@@ -400,13 +391,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       capturedAt: now.toISOString(),
       windowStartedAt: windowStart.toISOString(),
       windowEndedAt: now.toISOString(),
-      source: 'screenpipe',
+      source: 'minecontext',
       privacyState,
       apps,
       // Task matching is core-agent/server reasoning; the desktop runtime
       // only reports what was on screen.
       taskSignals: [],
-      summary: `observed ${apps.length} app(s): ${overview}${partial ? ' (partial window)' : ''}`,
+      summary: `observed ${apps.length} app(s): ${overview}`,
       // Digest quality proxy: share of observed apps that yielded any text.
       confidence: apps.filter(app => app.summary.length > 0).length / apps.length,
     }
@@ -425,13 +416,12 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       if (stored.pauseUntil && new Date(stored.pauseUntil).getTime() <= now.getTime())
         persist({ pauseUntil: undefined })
 
-      screenpipeAvailable = await screenpipe.health()
+      observationSourceAvailable = await minecontext.health()
 
       const settings = settingsFromConfig(getConfig())
-      if (screenpipeAvailable && settings.enabled && settings.allowedApps.length > 0) {
-        // Metadata-only probe: app name / window title, never OCR text —
-        // suppression detection must not breach the whitelist capture boundary.
-        const focused = await screenpipe.focusedWindow()
+      if (observationSourceAvailable && settings.enabled) {
+        // Metadata-only probe: app name / window title for meeting detection.
+        const focused = await minecontext.getFocusedApp()
         suppression.isMeeting = isMeetingSurface(focused?.appName, focused?.windowTitle)
       }
       else {
@@ -440,7 +430,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
 
       const state = publishStateIfChanged()
 
-      if (screenpipeAvailable && shouldCaptureScreen(state.privacyState)) {
+      if (observationSourceAvailable && shouldCaptureScreen(state.privacyState)) {
         const summary = await captureWindowSummary(now)
         if (summary) {
           latestSummaryAt = summary.capturedAt

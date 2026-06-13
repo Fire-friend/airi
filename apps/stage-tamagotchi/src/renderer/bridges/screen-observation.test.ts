@@ -27,7 +27,7 @@ function runtimeState(overrides: Partial<ScreenObservationRuntimeState> = {}): S
     },
     privacyState: 'disabled',
     suppression: { isFullscreen: false, isMeeting: false },
-    screenpipeAvailable: true,
+    observationSourceAvailable: true,
     tasks: [],
     ...overrides,
   }
@@ -61,7 +61,7 @@ function summaryFixture(id: string): ScreenObserverSummary {
     capturedAt: '2026-06-11T12:00:00.000Z',
     windowStartedAt: '2026-06-11T11:59:30.000Z',
     windowEndedAt: '2026-06-11T12:00:00.000Z',
-    source: 'screenpipe',
+    source: 'minecontext',
     privacyState: 'observing',
     apps: [{ appId: 'obsidian', appName: 'Obsidian', observedSeconds: 30, summary: 'editing report', matchedWhitelist: true }],
     taskSignals: [],
@@ -128,9 +128,9 @@ describe('initializeScreenObservationBridge', () => {
 
     const store = useScreenObservationStore()
     const dispose = initializeScreenObservationBridge({ context: context as never })
-    // screenpipeAvailable is only ever set by a runtime payload, so this
+    // observationSourceAvailable is only ever set by a runtime payload, so this
     // waits for hydration itself, not for a provisional state.
-    await vi.waitFor(() => expect(store.screenpipeAvailable).toBe(true))
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
 
     store.enabled = true
     store.allowedApps = ['Obsidian']
@@ -202,7 +202,7 @@ describe('initializeScreenObservationBridge', () => {
 
     const store = useScreenObservationStore()
     const dispose = initializeScreenObservationBridge({ context: context as never })
-    await vi.waitFor(() => expect(store.screenpipeAvailable).toBe(true))
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
 
     context.emit(electronScreenObservationStateChanged, runtimeState({
       settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },

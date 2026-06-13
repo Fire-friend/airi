@@ -3,7 +3,7 @@ import type { BrowserWindow } from 'electron'
 import type { Mock } from 'vitest'
 
 import type { I18n } from '../../../libs/i18n'
-import type { ScreenpipeClient } from './screenpipe'
+import type { MineContextClient } from './minecontext'
 
 import { createContext, defineInvoke } from '@moeru/eventa'
 import { createScreenObservationTask } from '@proj-airi/server-sdk-shared'
@@ -89,24 +89,43 @@ function activeTask(id: string, overrides?: { remainingWork?: string }) {
 
 describe('screen observer end-to-end bridge', () => {
   let openTaskTouch: Mock<(touch: TouchEventPayload) => Promise<TouchAction | undefined>>
-  let searchOcr: ReturnType<typeof vi.fn>
+  let getActivities: ReturnType<typeof vi.fn>
   let observer: ReturnType<typeof setupScreenObserver>
   let context: ReturnType<typeof createContext>
 
   function setup() {
     openTaskTouch = vi.fn<(touch: TouchEventPayload) => Promise<TouchAction | undefined>>(async () => 'ack')
-    searchOcr = vi.fn(async ({ appName }: { appName: string }) => ({
-      items: [{ appName, windowName: 'report.md', text: 'Q2 numbers', timestamp: new Date().toISOString() }],
-      complete: true,
-    }))
+    getActivities = vi.fn(async () => [
+      {
+        id: 'ctx-1',
+        title: 'Q2 numbers editing',
+        summary: 'Q2 numbers',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-1',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: 'Code', window: 'report.md' },
+          },
+        ],
+      },
+    ])
 
-    const screenpipe: ScreenpipeClient = {
+    const minecontext: MineContextClient = {
       health: vi.fn(async () => true),
-      searchOcr: searchOcr as unknown as ScreenpipeClient['searchOcr'],
-      focusedWindow: vi.fn(async () => ({ appName: 'Code', windowTitle: 'report.md' })),
+      getActivities: getActivities as unknown as MineContextClient['getActivities'],
+      getFocusedApp: vi.fn(async () => ({ appName: 'Code', windowTitle: 'report.md' })),
     }
 
-    observer = setupScreenObserver({ i18n: fakeI18n, noticeWindow: { openTaskTouch }, screenpipe })
+    observer = setupScreenObserver({ i18n: fakeI18n, noticeWindow: { openTaskTouch }, minecontext })
 
     context = createContext()
     // NOTICE:
@@ -147,7 +166,7 @@ describe('screen observer end-to-end bridge', () => {
     // Fresh install: observation is off, the poller must not capture.
     expect(observer.getState().privacyState).toBe('disabled')
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
-    expect(searchOcr).not.toHaveBeenCalled()
+    expect(getActivities).not.toHaveBeenCalled()
 
     // The user enables observation and whitelists an app in settings. The
     // whitelist arrives untrimmed and with a case-insensitive duplicate.
@@ -160,13 +179,12 @@ describe('screen observer end-to-end bridge', () => {
     const withTask = await upsertTask({ task })
     expect(withTask.tasks.map(t => t.id)).toEqual(['task-1'])
 
-    // Next tick: capture runs, scoped to the whitelisted app only.
+    // Next tick: capture runs and receives activities from MineContext.
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
-    expect(searchOcr).toHaveBeenCalled()
-    for (const call of searchOcr.mock.calls)
-      expect((call[0] as { appName: string }).appName).toBe('Code')
+    expect(getActivities).toHaveBeenCalled()
     expect(summaries.length).toBeGreaterThan(0)
     expect(summaries[0]!.apps[0]!.appName).toBe('Code')
+    expect(summaries[0]!.source).toBe('minecontext')
 
     // The decision ran against the shared policy: the brand-new user's first
     // task delivers its first progress update at L2 (cold-start exception),

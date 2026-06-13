@@ -194,7 +194,7 @@ app.whenReady().then(async () => {
     build: ({ dependsOn }) => setupNoticeWindowManager(dependsOn),
   })
 
-  // Desktop screen-observation runtime: screenpipe polling, pause state,
+  // Desktop screen-observation runtime: MineContext polling, pause state,
   // meeting suppression, the global pause shortcut, L2 task-touch notices,
   // and L3 notifications.
   const screenObserver = injeca.provide('services:screen-observer', {

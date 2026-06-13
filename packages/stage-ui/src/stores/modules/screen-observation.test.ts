@@ -56,7 +56,7 @@ describe('useScreenObservationStore appliers', () => {
       capturedAt,
       windowStartedAt: '2026-06-11T11:59:30.000Z',
       windowEndedAt: capturedAt,
-      source: 'screenpipe',
+      source: 'minecontext',
       privacyState: 'observing',
       apps: [{ appId: 'obsidian', appName: 'Obsidian', observedSeconds: 30, summary: 'editing report', matchedWhitelist: true }],
       taskSignals: [],
@@ -86,13 +86,13 @@ describe('useScreenObservationStore appliers', () => {
     store.applyRuntimeState({
       settings: { enabled: false, mode: 'whitelist', allowedApps: [], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
       privacyState: 'disabled',
-      screenpipeAvailable: true,
+      observationSourceAvailable: true,
     })
 
     expect(store.enabled).toBe(false)
     expect(store.allowedApps).toEqual([])
     expect(store.privacyState).toBe('disabled')
-    expect(store.screenpipeAvailable).toBe(true)
+    expect(store.observationSourceAvailable).toBe(true)
   })
 
   it('applyRuntimeState surfaces the runtime-resolved suppression states the renderer cannot derive', () => {

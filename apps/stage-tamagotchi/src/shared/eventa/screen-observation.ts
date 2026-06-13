@@ -28,8 +28,8 @@ export interface ScreenObservationRuntimeState {
     isFullscreen: boolean
     isMeeting: boolean
   }
-  /** Whether the local screenpipe service responded to the last health check. */
-  screenpipeAvailable: boolean
+  /** Whether the local observation source (MineContext) responded to the last health check. */
+  observationSourceAvailable: boolean
   /** ISO timestamp of the most recent captured summary, if any. */
   latestSummaryAt?: string
   /** Tasks registered with the desktop runtime; the main-process decide loop runs against these. */
