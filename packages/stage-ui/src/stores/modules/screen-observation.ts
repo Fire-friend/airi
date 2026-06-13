@@ -68,6 +68,19 @@ export function privacyStateLabelKey(state: ScreenObserverPrivacyState): string 
 }
 
 /**
+ * MineContext connection and polling config as returned by the desktop runtime.
+ *
+ * The renderer uses these values to populate the settings UI; edits are pushed
+ * back via the `updateMineContextConfig` IPC invoke.
+ */
+export interface RuntimeMineContextConfig {
+  baseUrl?: string
+  screenshotCaptureEnabled?: boolean
+  longMemoryPollIntervalMs?: number
+  currentStatePollIntervalMs?: number
+}
+
+/**
  * Authoritative observation state pushed by the platform runtime (the
  * Electron main process today). Field types come from the shared contract;
  * the shape is intentionally a subset so stage-ui never depends on
@@ -83,6 +96,8 @@ export interface RuntimeObservationState {
   observationSourceAvailable?: boolean
   /** Tasks registered with the runtime's decide loop; omitted payloads keep the current list. */
   tasks?: Task[]
+  /** MineContext connection and polling configuration from the desktop runtime. */
+  minecontextConfig?: RuntimeMineContextConfig
 }
 
 export interface ScreenObservationCurrentState {
@@ -364,6 +379,13 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
   const habitFacets = useLocalStorageManualReset<HabitFacet[]>('settings/screen-observation/habit-facets', [])
   const forgottenFacetKeys = useLocalStorageManualReset<string[]>('settings/screen-observation/forgotten-facet-keys', [])
 
+  // MineContext config — persisted locally so the UI reflects last-known values
+  // before the runtime responds to get-state. The runtime's values win on hydration.
+  const minecontextBaseUrl = useLocalStorageManualReset<string>('settings/screen-observation/minecontext-base-url', '')
+  const screenshotCaptureEnabled = useLocalStorageManualReset<boolean>('settings/screen-observation/screenshot-capture-enabled', false)
+  const longMemoryPollIntervalMs = useLocalStorageManualReset<number>('settings/screen-observation/long-memory-poll-interval-ms', 30_000)
+  const currentStatePollIntervalMs = useLocalStorageManualReset<number>('settings/screen-observation/current-state-poll-interval-ms', 15_000)
+
   // Runtime state. Hydrated by applySnapshot once the desktop runtime
   // (Electron main process ScreenObserver) pushes the authoritative
   // ScreenObservationSnapshot over Eventa; provisional before that.
@@ -421,6 +443,12 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     observationSourceAvailable.value = state.observationSourceAvailable
     if (state.tasks)
       tasks.value = state.tasks
+    if (state.minecontextConfig) {
+      minecontextBaseUrl.value = state.minecontextConfig.baseUrl ?? ''
+      screenshotCaptureEnabled.value = state.minecontextConfig.screenshotCaptureEnabled ?? false
+      longMemoryPollIntervalMs.value = state.minecontextConfig.longMemoryPollIntervalMs ?? 30_000
+      currentStatePollIntervalMs.value = state.minecontextConfig.currentStatePollIntervalMs ?? 15_000
+    }
   }
 
   /** Inserts a captured summary at the head of the log, replacing any redelivered duplicate by id. */
@@ -582,6 +610,10 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     longMemoryCandidates.reset()
     habitFacets.reset()
     forgottenFacetKeys.reset()
+    minecontextBaseUrl.reset()
+    screenshotCaptureEnabled.reset()
+    longMemoryPollIntervalMs.reset()
+    currentStatePollIntervalMs.reset()
     tasks.value = []
     observationLog.value = []
     latestTouches.value = []
@@ -606,6 +638,10 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     stableHabitFacets,
     provisionalHabitFacets,
     forgottenFacetKeys,
+    minecontextBaseUrl,
+    screenshotCaptureEnabled,
+    longMemoryPollIntervalMs,
+    currentStatePollIntervalMs,
     tasks,
     activeTasks,
     observationLog,

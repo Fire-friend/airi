@@ -18,6 +18,7 @@ import {
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
+  electronScreenObservationUpdateMineContextConfig,
   electronScreenObservationUpdateSettings,
 } from '../../shared/eventa'
 
@@ -83,10 +84,20 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   const context = options.context ?? getElectronEventaContext()
   const store = useScreenObservationStore()
   const contextPublisher = options.contextPublisher ?? useModsServerChannelStore()
-  const { enabled, allowedApps, dailySummaryEnabled, dailySummaryAtLocalTime } = storeToRefs(store)
+  const {
+    enabled,
+    allowedApps,
+    dailySummaryEnabled,
+    dailySummaryAtLocalTime,
+    minecontextBaseUrl,
+    screenshotCaptureEnabled,
+    longMemoryPollIntervalMs,
+    currentStatePollIntervalMs,
+  } = storeToRefs(store)
 
   const getState = defineInvoke(context, electronScreenObservationGetState)
   const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+  const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
 
   let lastKnownRemoteKey: string | undefined
 
@@ -145,6 +156,26 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
     { debounce: SETTINGS_PUSH_DEBOUNCE_MS, deep: true },
   )
 
+  const stopMineContextConfigWatcher = watchDebounced(
+    [minecontextBaseUrl, screenshotCaptureEnabled, longMemoryPollIntervalMs, currentStatePollIntervalMs],
+    async () => {
+      try {
+        const state = await updateMineContextConfig({
+          baseUrl: minecontextBaseUrl.value || undefined,
+          screenshotCaptureEnabled: screenshotCaptureEnabled.value,
+          longMemoryPollIntervalMs: longMemoryPollIntervalMs.value,
+          currentStatePollIntervalMs: currentStatePollIntervalMs.value,
+        })
+        if (state)
+          applyRuntimeState(state)
+      }
+      catch (error) {
+        console.warn('[screen-observation] failed to push minecontext config to runtime:', error)
+      }
+    },
+    { debounce: SETTINGS_PUSH_DEBOUNCE_MS, deep: true },
+  )
+
   const offStateChanged = context.on(electronScreenObservationStateChanged, (event) => {
     if (event.body)
       applyRuntimeState(event.body)
@@ -186,6 +217,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
 
   return () => {
     stopSettingsWatcher()
+    stopMineContextConfigWatcher()
     offStateChanged()
     offSummaryCaptured()
     offCurrentStateCaptured()

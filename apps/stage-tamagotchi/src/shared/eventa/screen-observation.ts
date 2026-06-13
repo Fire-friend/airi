@@ -32,6 +32,41 @@ export interface ScreenObserverCurrentState {
 }
 
 /**
+ * MineContext connection and polling configuration exposed to the renderer.
+ *
+ * These values are user-editable in settings and persisted by the main process.
+ * The renderer reads them back via `ScreenObservationRuntimeState.minecontextConfig`.
+ */
+export interface MineContextConfig {
+  /** Base URL of the local MineContext service. @default 'http://127.0.0.1:1733' */
+  baseUrl?: string
+  /**
+   * Whether the near-realtime current-state track (raw_context polling) is
+   * active. Requires MineContext to be started with screenshot capture enabled
+   * in its config (`capture_interval: 5`). Off by default — users must
+   * explicitly enable it after configuring MineContext.
+   *
+   * @default false
+   */
+  screenshotCaptureEnabled?: boolean
+  /**
+   * How often to query MineContext for new activity_context entries (long-memory
+   * track). Must be ≥ 10 000 ms.
+   *
+   * @default 30000
+   */
+  longMemoryPollIntervalMs?: number
+  /**
+   * How often to query MineContext for new raw_context entries (current-state
+   * track). Meaningful only when `screenshotCaptureEnabled` is true. Must be ≥
+   * 5 000 ms.
+   *
+   * @default 15000
+   */
+  currentStatePollIntervalMs?: number
+}
+
+/**
  * Live state of the Electron-main screen observation runtime.
  *
  * This is the desktop runtime's view (collection triggers, OS signals,
@@ -58,6 +93,8 @@ export interface ScreenObservationRuntimeState {
   latestCurrentStateAt?: string
   /** Tasks registered with the desktop runtime; the main-process decide loop runs against these. */
   tasks: Task[]
+  /** MineContext connection and polling config; the renderer reads this to populate the settings UI. */
+  minecontextConfig: MineContextConfig
 }
 
 export const electronScreenObservationGetState = defineInvokeEventa<ScreenObservationRuntimeState>('eventa:invoke:electron:screen-observation:get-state')
@@ -84,3 +121,9 @@ export const electronScreenObservationCurrentStateCaptured = defineEventa<Screen
 export const electronScreenObservationTouchDelivered = defineEventa<TouchEventPayload>('eventa:event:electron:screen-observation:touch-delivered')
 /** Emitted when the user clicks an L3 system notification; renderers navigate to the task details view. */
 export const electronScreenObservationOpenTaskDetails = defineEventa<{ taskId: string }>('eventa:event:electron:screen-observation:open-task-details')
+/**
+ * Updates MineContext connection and polling config in the main process.
+ * Returns the updated full runtime state so the renderer can reflect changes
+ * immediately (same pattern as `electronScreenObservationUpdateSettings`).
+ */
+export const electronScreenObservationUpdateMineContextConfig = defineInvokeEventa<ScreenObservationRuntimeState, Partial<MineContextConfig>>('eventa:invoke:electron:screen-observation:update-minecontext-config')

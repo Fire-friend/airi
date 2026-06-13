@@ -860,9 +860,24 @@ pages:
         purpose-general: 常规观察
         delete-today: 删除当日数据
         empty: 今天还没有观察记录。
-      data:
-        statement: 录屏数据保存在本机 screenpipe，发往模型的只有摘要。
-        open-folder: 打开数据文件夹
+      minecontext:
+        connected: '——已连接'
+        not-connected: '——无法连接。请先启动 MineContext 再试。'
+        title: MineContext 连接
+        description: MineContext 作为后台守护进程在本机 localhost:1733 运行，持续截图并分析屏幕内容。在这里配置连接地址和轮询间隔。
+        base-url:
+          label: 服务地址
+          description: 本地 MineContext 服务的 Base URL。留空则使用默认地址。
+          placeholder: http://127.0.0.1:1733
+        capture:
+          label: 启用截图采集轨道
+          description: 轮询 MineContext raw_context 条目（近实时，约每 15 秒一次）。需要先在 MineContext 的 config/config.yaml 中设置 capture_interval，然后再开启此开关。
+        current-state-interval:
+          label: 截图轮询间隔（毫秒）
+          description: 向 MineContext 查询新 raw_context 条目的频率，最低 5 000 毫秒。
+        long-memory-interval:
+          label: 活动摘要轮询间隔（毫秒）
+          description: 向 MineContext 查询新 activity_context 条目的频率，最低 10 000 毫秒。
   flux:
     title: Flux
     buy: 充值

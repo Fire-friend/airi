@@ -20,10 +20,18 @@ const {
   autoPauseOnFocus,
   onboardingCompleted,
   observationLog,
+  observationSourceAvailable,
   privacyState,
   statusLabelKey,
   tasks,
+  minecontextBaseUrl,
+  screenshotCaptureEnabled,
+  longMemoryPollIntervalMs,
+  currentStatePollIntervalMs,
 } = storeToRefs(store)
+
+const DEFAULT_LONG_MEMORY_POLL_MS = 30_000
+const DEFAULT_CURRENT_STATE_POLL_MS = 15_000
 
 const showOnboarding = computed(() => enabled.value && !onboardingCompleted.value)
 
@@ -68,6 +76,27 @@ function deleteTodayLog() {
     <Callout :theme="STATUS_THEME[privacyState] ?? 'primary'" :label="tn('status-title')">
       {{ t(statusLabelKey) }}
     </Callout>
+
+    <!-- MineContext connection status -->
+    <section
+      :class="[
+        'flex items-center gap-3 rounded-lg px-3 py-2',
+        'bg-neutral-50/80 dark:bg-neutral-900/40',
+      ]"
+    >
+      <span
+        :class="[
+          'size-2 shrink-0 rounded-full',
+          observationSourceAvailable
+            ? 'bg-lime-500'
+            : 'bg-neutral-400 dark:bg-neutral-600',
+        ]"
+      />
+      <p class="m-0 text-xs text-neutral-600 dark:text-neutral-300">
+        <span class="font-medium">MineContext</span>
+        {{ observationSourceAvailable ? tn('minecontext.connected') : tn('minecontext.not-connected') }}
+      </p>
+    </section>
 
     <FieldCheckbox
       v-model="enabled"
@@ -191,21 +220,43 @@ function deleteTodayLog() {
         </ul>
       </section>
 
-      <section
-        :class="[
-          'flex items-center justify-between gap-3 rounded-lg px-3 py-2',
-          'bg-neutral-50/80 dark:bg-neutral-900/40',
-        ]"
-      >
-        <p class="m-0 text-xs text-neutral-500 dark:text-neutral-400">
-          {{ tn('data.statement') }}
-        </p>
-        <!-- TODO: enable via Eventa once the desktop runtime exposes the
-             screenpipe data directory; the renderer alone cannot open it. -->
-        <Button
-          variant="secondary" size="sm"
-          icon="i-solar:folder-open-bold-duotone" :label="tn('data.open-folder')"
-          disabled
+      <section flex="~ col gap-3">
+        <div flex="~ col gap-1">
+          <h3 class="m-0 text-sm font-semibold">
+            {{ tn('minecontext.title') }}
+          </h3>
+          <p class="m-0 text-xs text-neutral-500 dark:text-neutral-400">
+            {{ tn('minecontext.description') }}
+          </p>
+        </div>
+
+        <FieldInput
+          v-model="minecontextBaseUrl"
+          :label="tn('minecontext.base-url.label')"
+          :description="tn('minecontext.base-url.description')"
+          :placeholder="tn('minecontext.base-url.placeholder')"
+        />
+
+        <FieldCheckbox
+          v-model="screenshotCaptureEnabled"
+          :label="tn('minecontext.capture.label')"
+          :description="tn('minecontext.capture.description')"
+        />
+
+        <FieldInput
+          v-model.number="currentStatePollIntervalMs"
+          type="number"
+          :label="tn('minecontext.current-state-interval.label')"
+          :description="tn('minecontext.current-state-interval.description')"
+          :placeholder="String(DEFAULT_CURRENT_STATE_POLL_MS)"
+        />
+
+        <FieldInput
+          v-model.number="longMemoryPollIntervalMs"
+          type="number"
+          :label="tn('minecontext.long-memory-interval.label')"
+          :description="tn('minecontext.long-memory-interval.description')"
+          :placeholder="String(DEFAULT_LONG_MEMORY_POLL_MS)"
         />
       </section>
     </template>

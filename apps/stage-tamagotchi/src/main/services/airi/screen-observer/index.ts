@@ -37,6 +37,7 @@ import {
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
+  electronScreenObservationUpdateMineContextConfig,
   electronScreenObservationUpdateSettings,
   electronScreenObservationUpsertTask,
 } from '../../../../shared/eventa/screen-observation'
@@ -96,6 +97,13 @@ const settingsPatchSchema = object({
   dailySummaryAtLocalTime: optional(pipe(string(), regex(LOCAL_TIME_PATTERN, 'expected HH:mm'))),
 })
 
+const minecontextConfigPatchSchema = object({
+  baseUrl: optional(pipe(string(), trim(), minLength(1), maxLength(256))),
+  screenshotCaptureEnabled: optional(boolean()),
+  longMemoryPollIntervalMs: optional(pipe(number(), minValue(10_000))),
+  currentStatePollIntervalMs: optional(pipe(number(), minValue(5_000))),
+})
+
 const pauseRequestSchema = object({
   reason: picklist(['manual_15m', 'manual_1h', 'manual_today', 'fullscreen', 'meeting']),
   pauseUntil: optional(isoTimestampSchema),
@@ -152,6 +160,17 @@ const screenObservationConfigSchema = object({
   dailySummaryEnabled: optional(boolean()),
   dailySummaryAtLocalTime: optional(string()),
   pauseShortcutAccelerator: optional(string()),
+  /**
+   * Base URL of the local MineContext service.
+   * @default 'http://127.0.0.1:1733'
+   */
+  minecontextBaseUrl: optional(pipe(string(), trim(), minLength(1), maxLength(256))),
+  /**
+   * Whether the near-realtime current-state track is active.
+   * Requires MineContext screenshot capture to be configured.
+   * @default false
+   */
+  screenshotCaptureEnabled: optional(boolean()),
   /**
    * Long-memory poll interval in ms (activity_context track).
    * Must be ≥ 10 000. Defaults to 30 000 (30 s).
@@ -289,7 +308,14 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   let ticking = false
   let currentStateTicking = false
 
-  const minecontext = options.minecontext ?? createMineContextClient()
+  // When no injected client is provided (the normal production path), read the
+  // base URL from persisted config at each call so users can change it in settings
+  // without restarting the app. A test-injected client bypasses this lookup.
+  function getMineContextClient(): MineContextClient {
+    if (options.minecontext)
+      return options.minecontext
+    return createMineContextClient({ baseUrl: getConfig().minecontextBaseUrl })
+  }
 
   function getConfig(): ScreenObservationConfig {
     return config.get() ?? {}
@@ -328,6 +354,12 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       latestSummaryAt,
       latestCurrentStateAt,
       tasks: Object.values(stored.tasks ?? {}),
+      minecontextConfig: {
+        baseUrl: stored.minecontextBaseUrl,
+        screenshotCaptureEnabled: stored.screenshotCaptureEnabled ?? false,
+        longMemoryPollIntervalMs: stored.longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS,
+        currentStatePollIntervalMs: stored.currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS,
+      },
     }
   }
 
@@ -403,7 +435,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     const longMemoryPollMs = getConfig().longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
     const windowStart = lastCaptureEndedAt ?? new Date(now.getTime() - longMemoryPollMs)
 
-    const activities = await minecontext.getActivities({ since: windowStart })
+    const activities = await getMineContextClient().getActivities({ since: windowStart })
 
     // Waterline advances even when no activities arrived: avoids re-querying
     // the same window and accumulating stale contexts on the next tick.
@@ -445,12 +477,12 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       if (stored.pauseUntil && new Date(stored.pauseUntil).getTime() <= now.getTime())
         persist({ pauseUntil: undefined })
 
-      observationSourceAvailable = await minecontext.health()
+      observationSourceAvailable = await getMineContextClient().health()
 
       const settings = settingsFromConfig(getConfig())
       if (observationSourceAvailable && settings.enabled) {
         // Metadata-only probe: app name / window title for meeting detection.
-        const focused = await minecontext.getFocusedApp()
+        const focused = await getMineContextClient().getFocusedApp()
         suppression.isMeeting = isMeetingSurface(focused?.appName, focused?.windowTitle)
       }
       else {
@@ -490,12 +522,30 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
    * - Observation is disabled or suppressed
    * - raw_context results are empty (MineContext capture module not enabled)
    */
+  function restartTimers() {
+    if (longMemoryPollTimer) {
+      clearInterval(longMemoryPollTimer)
+      longMemoryPollTimer = undefined
+    }
+    if (currentStatePollTimer) {
+      clearInterval(currentStatePollTimer)
+      currentStatePollTimer = undefined
+    }
+    const stored = getConfig()
+    const longMs = stored.longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
+    const currentMs = stored.currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS
+    longMemoryPollTimer = setInterval(() => void tick(), longMs)
+    currentStatePollTimer = setInterval(() => void currentStateTick(), currentMs)
+  }
+
   async function currentStateTick() {
     if (currentStateTicking)
       return
     currentStateTicking = true
     try {
-      // Fast track guards: skip if MineContext is down or observation is off.
+      // Fast track guards: skip if screenshot capture is disabled, MineContext is down, or observation is off.
+      if (!getConfig().screenshotCaptureEnabled)
+        return
       if (!observationSourceAvailable)
         return
       const settings = settingsFromConfig(getConfig())
@@ -508,7 +558,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       const currentStatePollMs = getConfig().currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS
       const windowStart = lastCurrentStateEndedAt ?? new Date(now.getTime() - currentStatePollMs)
 
-      const rawContexts = await minecontext.getActivities({
+      const rawContexts = await getMineContextClient().getActivities({
         since: windowStart,
         limit: 20,
         contextType: 'raw_context',
@@ -745,6 +795,21 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
 
     defineInvokeHandler(context, electronScreenObservationGetState, () => resolveState())
     defineInvokeHandler(context, electronScreenObservationUpdateSettings, patch => updateSettings(parseIpcPayload(settingsPatchSchema, patch ?? {}, 'screen observation settings')))
+    defineInvokeHandler(context, electronScreenObservationUpdateMineContextConfig, (patch) => {
+      const validated = parseIpcPayload(minecontextConfigPatchSchema, patch ?? {}, 'minecontext config')
+      const stored = getConfig()
+      const intervalsChanged = (validated.longMemoryPollIntervalMs !== undefined && validated.longMemoryPollIntervalMs !== stored.longMemoryPollIntervalMs)
+        || (validated.currentStatePollIntervalMs !== undefined && validated.currentStatePollIntervalMs !== stored.currentStatePollIntervalMs)
+      persist({
+        minecontextBaseUrl: validated.baseUrl ?? stored.minecontextBaseUrl,
+        screenshotCaptureEnabled: validated.screenshotCaptureEnabled ?? stored.screenshotCaptureEnabled,
+        longMemoryPollIntervalMs: validated.longMemoryPollIntervalMs ?? stored.longMemoryPollIntervalMs,
+        currentStatePollIntervalMs: validated.currentStatePollIntervalMs ?? stored.currentStatePollIntervalMs,
+      })
+      if (intervalsChanged)
+        restartTimers()
+      return publishStateIfChanged()
+    })
     defineInvokeHandler(context, electronScreenObservationPause, request => pause(parseIpcPayload(pauseRequestSchema, request, 'screen observation pause')))
     defineInvokeHandler(context, electronScreenObservationResume, () => resume())
     defineInvokeHandler(context, electronScreenObservationUpsertTask, request => upsertTask(parseIpcPayload(upsertTaskRequestSchema, request, 'screen observation task').task))
@@ -774,13 +839,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   registerPauseShortcut()
-
-  const stored = getConfig()
-  const longMemoryMs = stored.longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
-  const currentStateMs = stored.currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS
-
-  longMemoryPollTimer = setInterval(() => void tick(), longMemoryMs)
-  currentStatePollTimer = setInterval(() => void currentStateTick(), currentStateMs)
+  restartTimers()
   void tick()
 
   onAppBeforeQuit(() => dispose())
