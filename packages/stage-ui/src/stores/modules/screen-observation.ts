@@ -193,6 +193,14 @@ function matchesAnyPattern(value: string | undefined, patterns: readonly string[
   })
 }
 
+function isAllowedFocusedApp(appName: string, allowedAppNames: readonly string[]): boolean {
+  const normalized = normalizePrivacyText(appName)
+  if (!normalized)
+    return false
+
+  return allowedAppNames.some(allowedAppName => normalizePrivacyText(allowedAppName) === normalized)
+}
+
 function isDeniedObservationText(input: {
   appName?: string
   windowTitle?: string
@@ -429,6 +437,10 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
 
   function applyCurrentState(state: ScreenObservationCurrentState): ScreenObservationContextUpdate | undefined {
     if (!state.focusedApp || state.privacyState !== 'observing') {
+      latestCurrentState.value = undefined
+      return undefined
+    }
+    if (!isAllowedFocusedApp(state.focusedApp.appName, allowedApps.value)) {
       latestCurrentState.value = undefined
       return undefined
     }

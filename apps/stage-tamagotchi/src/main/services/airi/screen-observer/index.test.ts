@@ -67,7 +67,6 @@ vi.mock('../../../libs/electron/persistence', () => ({
 }))
 
 const POLL_INTERVAL_MS = 30 * 1000
-const CURRENT_STATE_POLL_MS = 15 * 1000
 
 const fakeI18n = {
   t: (key: string) => key,

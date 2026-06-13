@@ -9,7 +9,7 @@ import type {
 import type { BrowserWindow } from 'electron'
 import type { BaseIssue, BaseSchema, InferOutput } from 'valibot'
 
-import type { ScreenObservationRuntimeState } from '../../../../shared/eventa/screen-observation'
+import type { ScreenObservationRuntimeState, ScreenObserverCurrentState } from '../../../../shared/eventa/screen-observation'
 import type { I18n } from '../../../libs/i18n'
 import type { NoticeWindowManager } from '../../../windows/notice'
 import type { MineContextClient } from './minecontext'
@@ -40,9 +40,9 @@ import {
   electronScreenObservationUpdateSettings,
   electronScreenObservationUpsertTask,
 } from '../../../../shared/eventa/screen-observation'
-import type { ScreenObserverCurrentState } from '../../../../shared/eventa/screen-observation'
 import { onAppBeforeQuit } from '../../../libs/bootkit/lifecycle'
 import { createConfig } from '../../../libs/electron/persistence'
+import { aggregateContextActivities, createMineContextClient } from './minecontext'
 import {
   applyTouchOutcome,
   computePauseUntil,
@@ -52,7 +52,6 @@ import {
   recordTouchPresented,
   shouldCaptureScreen,
 } from './runtime'
-import { aggregateContextActivities, createMineContextClient } from './minecontext'
 
 type EventaContext = ReturnType<typeof createContext>['context']
 

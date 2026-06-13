@@ -129,6 +129,7 @@ describe('useScreenObservationStore appliers', () => {
 
   it('builds short-lived current-state context without adding long-memory evidence', () => {
     const store = useScreenObservationStore()
+    store.allowedApps = ['obsidian']
 
     const contextUpdate = store.applyCurrentState({
       capturedAt: '2026-06-11T12:00:00.000Z',
@@ -146,8 +147,24 @@ describe('useScreenObservationStore appliers', () => {
     expect(store.longMemoryCandidates).toHaveLength(0)
   })
 
+  it('does not publish current-state for a non-whitelisted focused app', () => {
+    const store = useScreenObservationStore()
+    store.allowedApps = ['Code']
+
+    const contextUpdate = store.applyCurrentState({
+      capturedAt: '2026-06-11T12:00:00.000Z',
+      privacyState: 'observing',
+      focusedApp: { appName: 'Obsidian', windowTitle: 'Quarterly report' },
+    })
+
+    expect(contextUpdate).toBeUndefined()
+    expect(store.latestCurrentState).toBeUndefined()
+    expect(store.longMemoryCandidates).toHaveLength(0)
+  })
+
   it('blocks denied apps and private windows before they reach context or memory', () => {
     const store = useScreenObservationStore()
+    store.allowedApps = ['Bitwarden']
 
     expect(store.applyCurrentState({
       capturedAt: '2026-06-11T12:00:00.000Z',
