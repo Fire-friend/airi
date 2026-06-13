@@ -1,4 +1,5 @@
 import type { ScreenObservationSettings, ScreenObserverSummary, Task, TouchEventPayload } from '@proj-airi/server-sdk-shared'
+import type { ScreenObservationContextUpdate } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 
 import type { ScreenObservationRuntimeState } from '../../shared/eventa'
 
@@ -8,6 +9,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  electronScreenObservationCurrentStateCaptured,
   electronScreenObservationGetState,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
@@ -85,6 +87,7 @@ function touchFixture(id: string): TouchEventPayload {
 
 describe('initializeScreenObservationBridge', () => {
   beforeEach(() => {
+    globalThis.localStorage?.clear()
     setActivePinia(createPinia())
   })
 
@@ -196,25 +199,40 @@ describe('initializeScreenObservationBridge', () => {
     dispose()
   })
 
-  it('applies broadcast state changes, captured summaries, and delivered touches to the store', async () => {
+  it('applies broadcast state changes and publishes current-state plus long-memory context', async () => {
     const context = createContext()
     defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState())
+    const published: ScreenObservationContextUpdate[] = []
 
     const store = useScreenObservationStore()
-    const dispose = initializeScreenObservationBridge({ context: context as never })
+    const dispose = initializeScreenObservationBridge({
+      context: context as never,
+      contextPublisher: { sendContextUpdate: update => published.push(update) },
+    })
     await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
 
     context.emit(electronScreenObservationStateChanged, runtimeState({
       settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
-      privacyState: 'suppressed_meeting',
+      privacyState: 'observing',
     }))
+    context.emit(electronScreenObservationCurrentStateCaptured, {
+      capturedAt: '2026-06-11T12:00:00.000Z',
+      privacyState: 'observing',
+      focusedApp: { appName: 'Obsidian', windowTitle: 'Quarterly report' },
+    })
     context.emit(electronScreenObservationSummaryCaptured, { summary: summaryFixture('s-1') })
     context.emit(electronScreenObservationTouchDelivered, touchFixture('t-1'))
 
     await vi.waitFor(() => {
-      expect(store.privacyState).toBe('suppressed_meeting')
+      expect(store.privacyState).toBe('observing')
+      expect(store.latestCurrentState?.focusedApp?.appName).toBe('Obsidian')
       expect(store.observationLog.map(entry => entry.id)).toEqual(['s-1'])
+      expect(store.longMemoryCandidates).toHaveLength(1)
       expect(store.latestTouches.map(entry => entry.id)).toEqual(['t-1'])
+      expect(published.map(update => update.contextId)).toEqual([
+        'screen-observation:current-state',
+        'screen-observation:long-memory-candidates',
+      ])
     })
 
     dispose()

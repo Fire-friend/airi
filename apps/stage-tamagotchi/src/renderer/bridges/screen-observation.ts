@@ -1,15 +1,18 @@
 import type { ScreenObservationSettings } from '@proj-airi/server-sdk-shared'
+import type { ScreenObservationContextUpdate } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 import type { Router } from 'vue-router'
 
 import type { ScreenObservationRuntimeState } from '../../shared/eventa'
 
 import { defineInvoke } from '@moeru/eventa'
 import { getElectronEventaContext } from '@proj-airi/electron-vueuse'
+import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
 import { useScreenObservationStore } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 import { watchDebounced } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 
 import {
+  electronScreenObservationCurrentStateCaptured,
   electronScreenObservationGetState,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationStateChanged,
@@ -40,6 +43,10 @@ const SETTINGS_PUSH_DEBOUNCE_MS = 300
 // hijacked into the dashboard route.
 const TASK_DETAILS_NAVIGABLE_ROUTES = new Set(['/', '/dashboard'])
 
+export interface ScreenObservationContextPublisher {
+  sendContextUpdate: (message: ScreenObservationContextUpdate) => void
+}
+
 export interface ScreenObservationBridgeOptions {
   /**
    * Eventa context to bind against.
@@ -48,6 +55,11 @@ export interface ScreenObservationBridgeOptions {
   context?: ReturnType<typeof getElectronEventaContext>
   /** Router used to honor open-task-details navigation; navigation is skipped when omitted. */
   router?: Router
+  /**
+   * Context publisher for tests or alternate hosts.
+   * @default useModsServerChannelStore()
+   */
+  contextPublisher?: ScreenObservationContextPublisher
 }
 
 /**
@@ -70,6 +82,7 @@ export interface ScreenObservationBridgeOptions {
 export function initializeScreenObservationBridge(options: ScreenObservationBridgeOptions = {}) {
   const context = options.context ?? getElectronEventaContext()
   const store = useScreenObservationStore()
+  const contextPublisher = options.contextPublisher ?? useModsServerChannelStore()
   const { enabled, allowedApps, dailySummaryEnabled, dailySummaryAtLocalTime } = storeToRefs(store)
 
   const getState = defineInvoke(context, electronScreenObservationGetState)
@@ -138,8 +151,19 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   })
 
   const offSummaryCaptured = context.on(electronScreenObservationSummaryCaptured, (event) => {
-    if (event.body)
-      store.applySummary(event.body.summary)
+    if (!event.body)
+      return
+    const result = store.applySummary(event.body.summary)
+    if (result?.contextUpdate)
+      contextPublisher.sendContextUpdate(result.contextUpdate)
+  })
+
+  const offCurrentStateCaptured = context.on(electronScreenObservationCurrentStateCaptured, (event) => {
+    if (!event.body)
+      return
+    const contextUpdate = store.applyCurrentState(event.body)
+    if (contextUpdate)
+      contextPublisher.sendContextUpdate(contextUpdate)
   })
 
   const offTouchDelivered = context.on(electronScreenObservationTouchDelivered, (event) => {
@@ -164,6 +188,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
     stopSettingsWatcher()
     offStateChanged()
     offSummaryCaptured()
+    offCurrentStateCaptured()
     offTouchDelivered()
     offOpenTaskDetails()
   }

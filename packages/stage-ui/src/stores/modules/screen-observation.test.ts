@@ -47,14 +47,20 @@ describe('privacyStateLabelKey', () => {
 
 describe('useScreenObservationStore appliers', () => {
   beforeEach(() => {
+    globalThis.localStorage?.clear()
     setActivePinia(createPinia())
   })
 
-  function summaryFixture(id: string, capturedAt = '2026-06-11T12:00:00.000Z'): ScreenObserverSummary {
+  function summaryFixture(
+    id: string,
+    capturedAt = '2026-06-11T12:00:00.000Z',
+    overrides: Partial<ScreenObserverSummary> = {},
+  ): ScreenObserverSummary {
+    const start = new Date(new Date(capturedAt).getTime() - 30_000).toISOString()
     return {
       id,
       capturedAt,
-      windowStartedAt: '2026-06-11T11:59:30.000Z',
+      windowStartedAt: start,
       windowEndedAt: capturedAt,
       source: 'minecontext',
       privacyState: 'observing',
@@ -62,6 +68,7 @@ describe('useScreenObservationStore appliers', () => {
       taskSignals: [],
       summary: 'editing report outline',
       confidence: 0.9,
+      ...overrides,
     }
   }
 
@@ -118,6 +125,103 @@ describe('useScreenObservationStore appliers', () => {
     store.applySummary(redelivered)
     expect(store.observationLog.map(entry => entry.id)).toEqual(['s-1', 's-2'])
     expect(store.observationLog[0]!.summary).toBe('updated digest')
+  })
+
+  it('builds short-lived current-state context without adding long-memory evidence', () => {
+    const store = useScreenObservationStore()
+
+    const contextUpdate = store.applyCurrentState({
+      capturedAt: '2026-06-11T12:00:00.000Z',
+      privacyState: 'observing',
+      focusedApp: { appName: 'Obsidian', windowTitle: 'Quarterly report' },
+    })
+
+    expect(contextUpdate).toMatchObject({
+      contextId: 'screen-observation:current-state',
+      strategy: 'replace-self',
+      metadata: { lane: 'current-state', retention: 'ephemeral', longMemory: false },
+    })
+    expect(contextUpdate?.text).toContain('short-lived')
+    expect(store.latestCurrentState?.focusedApp?.appName).toBe('Obsidian')
+    expect(store.longMemoryCandidates).toHaveLength(0)
+  })
+
+  it('blocks denied apps and private windows before they reach context or memory', () => {
+    const store = useScreenObservationStore()
+
+    expect(store.applyCurrentState({
+      capturedAt: '2026-06-11T12:00:00.000Z',
+      privacyState: 'observing',
+      focusedApp: { appName: 'Bitwarden', windowTitle: 'Vault' },
+    })).toBeUndefined()
+    expect(store.latestCurrentState).toBeUndefined()
+
+    const deniedSummary = summaryFixture('s-private', '2026-06-11T12:00:00.000Z', {
+      apps: [{
+        appId: 'browser',
+        appName: 'Browser',
+        windowTitle: 'github.com/settings/tokens',
+        observedSeconds: 30,
+        summary: 'viewing token settings',
+        matchedWhitelist: true,
+      }],
+      summary: 'viewing token settings',
+    })
+
+    expect(store.applySummary(deniedSummary)).toBeUndefined()
+    expect(store.observationLog).toHaveLength(0)
+    expect(store.longMemoryCandidates).toHaveLength(0)
+  })
+
+  it('dedupes long-memory candidates by content-addressed hash', () => {
+    const store = useScreenObservationStore()
+
+    const first = store.applySummary(summaryFixture('s-1'))
+    const duplicate = store.applySummary(summaryFixture('s-redelivered'))
+
+    expect(first?.duplicate).toBe(false)
+    expect(first?.contextUpdate).toMatchObject({
+      contextId: 'screen-observation:long-memory-candidates',
+      strategy: 'replace-self',
+      metadata: { lane: 'long-memory-candidate', privacyFiltered: true },
+    })
+    expect(duplicate?.duplicate).toBe(true)
+    expect(duplicate?.contextUpdate).toBeUndefined()
+    expect(store.longMemoryCandidates).toHaveLength(1)
+  })
+
+  it('promotes recurring app focus to a stable facet only after multi-day evidence', () => {
+    const store = useScreenObservationStore()
+
+    store.applySummary(summaryFixture('s-1', '2026-06-09T12:00:00.000Z'))
+    store.applySummary(summaryFixture('s-2', '2026-06-10T12:00:00.000Z'))
+    const result = store.applySummary(summaryFixture('s-3', '2026-06-11T12:00:00.000Z'))
+
+    expect(result?.promotedFacets).toHaveLength(1)
+    expect(store.stableHabitFacets).toHaveLength(1)
+    expect(store.stableHabitFacets[0]).toMatchObject({
+      key: 'focus_app:obsidian',
+      status: 'stable',
+      evidenceCount: 3,
+      distinctDayCount: 3,
+      halfLifeDays: 14,
+    })
+    expect(result?.contextUpdate?.text).toContain('Stable facets: Recurring focus app: Obsidian')
+  })
+
+  it('forgets a facet and clears its evidence chain', () => {
+    const store = useScreenObservationStore()
+
+    store.applySummary(summaryFixture('s-1', '2026-06-09T12:00:00.000Z'))
+    store.applySummary(summaryFixture('s-2', '2026-06-10T12:00:00.000Z'))
+    store.applySummary(summaryFixture('s-3', '2026-06-11T12:00:00.000Z'))
+    expect(store.stableHabitFacets).toHaveLength(1)
+
+    store.forgetFacet('focus_app:obsidian')
+
+    expect(store.habitFacets).toHaveLength(0)
+    expect(store.longMemoryCandidates).toHaveLength(0)
+    expect(store.forgottenFacetKeys).toContain('focus_app:obsidian')
   })
 
   it('applyTouch prepends and dedupes by id', () => {
