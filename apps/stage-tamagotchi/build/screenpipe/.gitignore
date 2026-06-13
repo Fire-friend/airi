@@ -1,0 +1,10 @@
+# Keep release binaries local unless release automation intentionally stages them.
+*
+!.gitignore
+!README.md
+!win/
+!win/.gitkeep
+!mac/
+!mac/.gitkeep
+!linux/
+!linux/.gitkeep

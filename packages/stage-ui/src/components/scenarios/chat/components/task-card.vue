@@ -75,6 +75,8 @@ const observationText = computed(() => {
   const { observation } = props.task
   if (!observation.enabled || observation.privacyState === 'disabled')
     return tn('observation.disabled')
+  if (observation.mode === 'desktop')
+    return tn('observation.desktop')
   if (observation.allowedApps.length === 0)
     return tn('observation.empty-whitelist')
   return tn('observation.apps', { apps: observation.allowedApps.join('、') })

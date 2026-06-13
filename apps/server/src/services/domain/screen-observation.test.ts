@@ -1,15 +1,14 @@
-import { describe, expect, it } from 'vitest'
-
 import {
   createScreenObservationTask,
-  DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
   decideDailySummary,
   decideScreenObservationTouch,
+  DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
   isBarePercentage,
   normalizeScreenObserverSummary,
   resolveObservationPrivacyState,
   TOUCH_THROTTLE_WINDOW_MS,
 } from '@proj-airi/server-sdk-shared'
+import { describe, expect, it } from 'vitest'
 
 const now = new Date('2026-06-11T03:00:00.000Z')
 
@@ -30,9 +29,9 @@ function createActiveTask() {
 }
 
 describe('screen observation domain contract', () => {
-  it('treats an empty whitelist as an explicit not-observing state', () => {
+  it('defaults new tasks to desktop observation without requiring selected apps', () => {
     const task = createScreenObservationTask({
-      id: 'task-empty-whitelist',
+      id: 'task-desktop-observation',
       userId: 'user-1',
       title: 'Draft launch memo',
       observation: {
@@ -42,16 +41,36 @@ describe('screen observation domain contract', () => {
     }, now)
 
     expect(task.observation).toMatchObject({
-      mode: 'whitelist',
+      mode: 'desktop',
       allowedApps: [],
-      privacyState: 'not_observing_empty_whitelist',
-      isEffectivelyObserving: false,
+      privacyState: 'observing',
+      isEffectivelyObserving: true,
     })
     expect(task.schedule.dailySummaryAtLocalTime).toBe(DEFAULT_DAILY_SUMMARY_LOCAL_TIME)
     expect(task.touchPolicy).toMatchObject({
       level: 'L1',
       firstTaskFirstProgressUsesL2: true,
       dailySummaryEnabled: true,
+    })
+  })
+
+  it('treats application mode without apps as an explicit not-observing state', () => {
+    const task = createScreenObservationTask({
+      id: 'task-empty-application-mode',
+      userId: 'user-1',
+      title: 'Draft launch memo',
+      observation: {
+        enabled: true,
+        mode: 'application',
+        allowedApps: [],
+      },
+    }, now)
+
+    expect(task.observation).toMatchObject({
+      mode: 'application',
+      allowedApps: [],
+      privacyState: 'not_observing_empty_whitelist',
+      isEffectivelyObserving: false,
     })
   })
 
@@ -92,6 +111,22 @@ describe('screen observation domain contract', () => {
       }],
       summary: 'User continued report writing.',
       confidence: Number.NaN,
+      contexts: [{
+        id: 'context-1',
+        contextType: 'state_context',
+        title: ' Screen state ',
+        summary: ' Failed health check ',
+        keywords: ['Obsidian', 'obsidian', ''],
+        entities: ['screenpipe', 'Screenpipe'],
+        confidence: 4,
+        importance: -10,
+        createdAt: now.toISOString(),
+        evidence: [{
+          summaryId: 'summary-1',
+          appName: 'Obsidian',
+          observedSeconds: -5,
+        }],
+      }],
       rawReference: 'screenpipe://local/session/abc',
     })
 
@@ -100,6 +135,16 @@ describe('screen observation domain contract', () => {
       confidence: 0,
       apps: [{ observedSeconds: 0 }],
       taskSignals: [{ confidence: 1 }],
+      contexts: [{
+        title: 'Screen state',
+        summary: 'Failed health check',
+        keywords: ['Obsidian'],
+        entities: ['screenpipe'],
+        confidence: 1,
+        importance: 0,
+        eventTime: now.toISOString(),
+        evidence: [{ observedSeconds: 0 }],
+      }],
     })
   })
 

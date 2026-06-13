@@ -29,7 +29,8 @@ chat:
       unscheduled: No schedule set
     observation:
       disabled: Nothing — screen observation is off.
-      empty-whitelist: Nothing yet — no apps are whitelisted, so nothing will be observed.
+      desktop: Connected desktop screens.
+      empty-whitelist: Nothing yet — application mode has no apps selected.
       apps: '{apps}'
     touch-level:
       l0: Silent — progress only in the task card

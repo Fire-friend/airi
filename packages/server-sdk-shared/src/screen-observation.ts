@@ -6,10 +6,14 @@ export const DEFAULT_TOUCH_LEVEL = 'L1'
 export const FIRST_TASK_FIRST_PROGRESS_LEVEL = 'L2'
 export const FOCUS_SUPPRESSION_LEVEL = 'L0'
 export const DEFAULT_DAILY_SUMMARY_LOCAL_TIME = '18:00'
+export const DEFAULT_FRAME_CAPTURE_INTERVAL_MS = 10 * 1000
+export const MIN_FRAME_CAPTURE_INTERVAL_MS = 2 * 1000
+export const MAX_FRAME_CAPTURE_INTERVAL_MS = 5 * 60 * 1000
 
 export type TaskStatus = 'draft' | 'active' | 'paused' | 'completed' | 'cancelled' | 'archived'
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
-export type ObservationMode = 'whitelist'
+export type ObservationMode = 'desktop' | 'application'
+export type ScreenObservationCaptureBackend = 'native_frames' | 'screenpipe'
 export type TouchLevel = 'L0' | 'L1' | 'L2' | 'L3'
 export type TouchAction = 'ack' | 'details' | 'mute_task' | 'pause_15m' | 'pause_1h' | 'pause_today' | 'resume'
 export type TouchReason
@@ -102,18 +106,110 @@ export interface ScreenObserverTaskSignal {
   confidence: number
 }
 
+export type ScreenObservationContextType
+  = | 'entity_context'
+    | 'activity_context'
+    | 'intent_context'
+    | 'semantic_context'
+    | 'procedural_context'
+    | 'state_context'
+    | 'knowledge_context'
+
+/**
+ * Stable context categories produced from screen observations.
+ *
+ * These categories are intentionally aligned with MineContext's context
+ * taxonomy so AIRI can evolve from OCR digests toward VLM-backed contextual
+ * memory without changing upper-layer consumers.
+ *
+ * Source context:
+ * - `https://github.com/volcengine/MineContext/blob/main/opencontext/models/enums.py`
+ */
+export const SCREEN_OBSERVATION_CONTEXT_TYPE_DESCRIPTIONS = {
+  entity_context: 'People, projects, applications, documents, repositories, or organizations visible in the observation.',
+  activity_context: 'Completed or ongoing user activity inferred from the observation.',
+  intent_context: 'Forward-looking plans, goals, todos, or next actions inferred from the observation.',
+  semantic_context: 'Knowledge, concepts, explanations, or reference material visible in the observation.',
+  procedural_context: 'Reusable operation steps, workflows, debugging flows, or task procedures.',
+  state_context: 'Current progress, status, error, risk, or blocked condition.',
+  knowledge_context: 'File or document knowledge captured from local files, web pages, or screen-visible documents.',
+} satisfies Record<ScreenObservationContextType, string>
+
+/**
+ * Evidence linking one processed context back to observation surfaces.
+ */
+export interface ScreenObservationContextEvidence {
+  /** Summary id that produced this evidence item. */
+  summaryId: string
+  /** Application name associated with the evidence, when known. */
+  appName?: string
+  /** Window title associated with the evidence, when known. */
+  windowTitle?: string
+  /** Estimated seconds this evidence was visible during the observation window. */
+  observedSeconds?: number
+}
+
+/**
+ * Processed context extracted from one or more screen observations.
+ */
+export interface ScreenObservationProcessedContext {
+  /** Stable id for this extracted context. */
+  id: string
+  /** MineContext-compatible semantic category for routing, retrieval, and memory. */
+  contextType: ScreenObservationContextType
+  /** Short human-readable title. */
+  title: string
+  /** Compact description suitable for AIRI reasoning and UI logs. */
+  summary: string
+  /** Search and retrieval keywords extracted from the observation. */
+  keywords: string[]
+  /** Named entities extracted from the observation. */
+  entities: string[]
+  /** Model or heuristic confidence in the extracted context, from 0 to 1. */
+  confidence: number
+  /** Relative context importance, from 0 to 100. */
+  importance: number
+  /** When the context was created. */
+  createdAt: string
+  /** When the observed activity or state happened. */
+  eventTime: string
+  /** When this processed context was last updated. */
+  updatedAt: string
+  /** Evidence surfaces that produced this context. */
+  evidence: ScreenObservationContextEvidence[]
+  /** Optional local reference to raw observation storage. */
+  rawReference?: string
+}
+
+/**
+ * Proactive activity insight generated from processed observation contexts.
+ */
+export interface ScreenObservationActivityInsight {
+  /** Candidate todos inferred from recent contexts. */
+  potentialTodos: { title: string, reason: string }[]
+  /** Lightweight suggestions AIRI may proactively surface. */
+  tipSuggestions: { title: string, reason: string }[]
+  /** Entities that dominated the recent context window. */
+  keyEntities: string[]
+  /** Current focus areas inferred from recent activity. */
+  focusAreas: string[]
+  /** Small structured work-pattern signals such as repeated app switches or long-running blocked states. */
+  workPatterns: Record<string, string | number | boolean | null>
+}
+
 export interface ScreenObserverSummary {
   id: string
   taskId?: string
   capturedAt: string
   windowStartedAt: string
   windowEndedAt: string
-  source: 'screenpipe'
+  source: ScreenObservationCaptureBackend
   privacyState: ScreenObserverPrivacyState
   apps: ScreenObserverAppSummary[]
   taskSignals: ScreenObserverTaskSignal[]
   summary: string
   confidence: number
+  contexts?: ScreenObservationProcessedContext[]
   rawReference?: string
 }
 
@@ -156,15 +252,15 @@ export interface DailySummaryPayload {
   touch?: TouchEventPayload
 }
 
-export type ScreenObservationI18nKey =
-  | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.blocked'
-  | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.ready'
-  | 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
-  | 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track'
-  | 'tamagotchi.screen_observation.daily_summary.observation.off_track'
-  | 'tamagotchi.screen_observation.daily_summary.observation.on_track'
-  | 'tamagotchi.screen_observation.daily_summary.tomorrow.blocked'
-  | 'tamagotchi.screen_observation.daily_summary.tomorrow.ready'
+export type ScreenObservationI18nKey
+  = | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.blocked'
+    | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.ready'
+    | 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
+    | 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track'
+    | 'tamagotchi.screen_observation.daily_summary.observation.off_track'
+    | 'tamagotchi.screen_observation.daily_summary.observation.on_track'
+    | 'tamagotchi.screen_observation.daily_summary.tomorrow.blocked'
+    | 'tamagotchi.screen_observation.daily_summary.tomorrow.ready'
 
 export type I18nTextParam = string | number | boolean | null | undefined
 
@@ -194,8 +290,14 @@ export interface ScreenObservationSettings {
   enabled: boolean
   mode: ObservationMode
   allowedApps: string[]
+  /** Observation capture backend. Native frames avoid screenpipe video chunks. */
+  captureBackend: ScreenObservationCaptureBackend
+  /** Milliseconds between native frame captures. */
+  frameCaptureIntervalMs: number
   dailySummaryEnabled: boolean
   dailySummaryAtLocalTime: string
+  /** screenpipe storage root passed as `--data-dir`; undefined lets the runtime use its default. */
+  screenpipeDataDirectory?: string
 }
 
 export interface ScreenObservationSnapshot {
@@ -231,6 +333,7 @@ export interface CreateTaskInput {
 
 export interface ObservationStateInput {
   enabled: boolean
+  mode?: ObservationMode
   allowedApps: string[]
   pauseUntil?: string
   now?: Date
@@ -244,11 +347,45 @@ export interface NormalizeSummaryInput {
   capturedAt: string
   windowStartedAt: string
   windowEndedAt: string
+  source?: ScreenObservationCaptureBackend
   privacyState: ScreenObserverPrivacyState
   apps?: ScreenObserverAppSummary[]
   taskSignals?: ScreenObserverTaskSignal[]
   summary: string
   confidence?: number
+  contexts?: NormalizeProcessedContextInput[]
+  rawReference?: string
+}
+
+/**
+ * Input for normalizing processed screen-observation context.
+ */
+export interface NormalizeProcessedContextInput {
+  /** Stable id for the context. */
+  id: string
+  /** MineContext-compatible semantic category. */
+  contextType: ScreenObservationContextType
+  /** Short human-readable title. */
+  title: string
+  /** Compact context summary. */
+  summary: string
+  /** Search and retrieval keywords. */
+  keywords?: string[]
+  /** Named entities. */
+  entities?: string[]
+  /** Model or heuristic confidence in the extracted context, from 0 to 1. */
+  confidence?: number
+  /** Relative context importance, from 0 to 100. */
+  importance?: number
+  /** When the context was created. */
+  createdAt: string
+  /** When the observed activity or state happened. */
+  eventTime?: string
+  /** When this processed context was last updated. */
+  updatedAt?: string
+  /** Evidence surfaces that produced this context. */
+  evidence?: ScreenObservationContextEvidence[]
+  /** Optional local reference to raw observation storage. */
   rawReference?: string
 }
 
@@ -307,9 +444,11 @@ const touchLevels: TouchLevel[] = ['L0', 'L1', 'L2', 'L3']
  * this shared contract stays deterministic across runtimes.
  */
 export function createScreenObservationTask(input: CreateTaskInput, now = new Date()): Task {
+  const mode = input.observation?.mode ?? 'desktop'
   const allowedApps = input.observation?.allowedApps ?? []
   const privacyState = resolveObservationPrivacyState({
     enabled: input.observation?.enabled ?? true,
+    mode,
     allowedApps,
     pauseUntil: input.observation?.pauseUntil,
     now,
@@ -333,7 +472,7 @@ export function createScreenObservationTask(input: CreateTaskInput, now = new Da
     },
     observation: {
       enabled: input.observation?.enabled ?? true,
-      mode: 'whitelist',
+      mode,
       allowedApps,
       pauseUntil: input.observation?.pauseUntil,
       privacyState,
@@ -352,12 +491,14 @@ export function createScreenObservationTask(input: CreateTaskInput, now = new Da
 /**
  * Resolves the user-visible observation state for privacy controls.
  *
- * Empty whitelist is an explicit off state even when the master toggle is on.
+ * Desktop mode observes the connected screen capture stream without requiring
+ * app names. Application mode treats an empty app list as an explicit off
+ * state even when the master toggle is on.
  */
 export function resolveObservationPrivacyState(input: ObservationStateInput): ScreenObserverPrivacyState {
   if (!input.enabled)
     return 'disabled'
-  if (input.allowedApps.length === 0)
+  if ((input.mode ?? 'desktop') === 'application' && input.allowedApps.length === 0)
     return 'not_observing_empty_whitelist'
   if (input.isMeeting)
     return 'suppressed_meeting'
@@ -372,7 +513,7 @@ export function resolveObservationPrivacyState(input: ObservationStateInput): Sc
 }
 
 /**
- * Normalizes screenpipe-derived summaries before they enter task reasoning.
+ * Normalizes screen-observation summaries before they enter task reasoning.
  *
  * The summary contract intentionally carries app/time/evidence summaries, not
  * screenshots or raw OCR text.
@@ -384,7 +525,7 @@ export function normalizeScreenObserverSummary(input: NormalizeSummaryInput): Sc
     capturedAt: input.capturedAt,
     windowStartedAt: input.windowStartedAt,
     windowEndedAt: input.windowEndedAt,
-    source: 'screenpipe',
+    source: input.source ?? 'screenpipe',
     privacyState: input.privacyState,
     apps: (input.apps ?? []).map(app => ({
       ...app,
@@ -396,6 +537,39 @@ export function normalizeScreenObserverSummary(input: NormalizeSummaryInput): Sc
     })),
     summary: input.summary,
     confidence: clampConfidence(input.confidence ?? 1),
+    contexts: input.contexts?.map(normalizeScreenObservationProcessedContext),
+    rawReference: input.rawReference,
+  }
+}
+
+/**
+ * Normalizes processed screen-observation context.
+ *
+ * Before:
+ * - confidence = 4, importance = -10, keywords = ["Code", "Code"]
+ *
+ * After:
+ * - confidence = 1, importance = 0, keywords = ["Code"]
+ */
+export function normalizeScreenObservationProcessedContext(input: NormalizeProcessedContextInput): ScreenObservationProcessedContext {
+  return {
+    id: input.id,
+    contextType: input.contextType,
+    title: input.title.trim(),
+    summary: input.summary.trim(),
+    keywords: dedupeStrings(input.keywords ?? []),
+    entities: dedupeStrings(input.entities ?? []),
+    confidence: clampConfidence(input.confidence ?? 1),
+    importance: clampImportance(input.importance ?? 0),
+    createdAt: input.createdAt,
+    eventTime: input.eventTime ?? input.createdAt,
+    updatedAt: input.updatedAt ?? input.createdAt,
+    evidence: (input.evidence ?? []).map(item => ({
+      ...item,
+      observedSeconds: item.observedSeconds !== undefined
+        ? Math.max(0, item.observedSeconds)
+        : undefined,
+    })),
     rawReference: input.rawReference,
   }
 }
@@ -594,14 +768,16 @@ function normalizeDailySummaryProgress(progress: TaskProgressNarrative | undefin
       ),
     ),
     etaAt: progress?.etaAt,
-    pace: progress?.pace ? normalizeDailySummarySentence(
-      progress.pace,
-      dailySummaryI18nText(
-        isOffTrack
-          ? 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
-          : 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track',
-      ),
-    ) : undefined,
+    pace: progress?.pace
+      ? normalizeDailySummarySentence(
+          progress.pace,
+          dailySummaryI18nText(
+            isOffTrack
+              ? 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
+              : 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track',
+          ),
+        )
+      : undefined,
     isOffTrack,
   }
 }
@@ -652,6 +828,28 @@ function clampConfidence(value: number): number {
   if (Number.isNaN(value))
     return 0
   return Math.max(0, Math.min(1, value))
+}
+
+function clampImportance(value: number): number {
+  if (Number.isNaN(value))
+    return 0
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed)
+      continue
+    const key = trimmed.toLowerCase()
+    if (seen.has(key))
+      continue
+    seen.add(key)
+    result.push(trimmed)
+  }
+  return result
 }
 
 export const screenObservationGetSnapshot = defineInvokeEventa<ScreenObservationSnapshot>('screen-observation:get-snapshot')

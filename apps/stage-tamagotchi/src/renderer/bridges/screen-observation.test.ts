@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   electronScreenObservationGetState,
+  electronScreenObservationOpenDataFolder,
+  electronScreenObservationSelectDataFolder,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -20,8 +22,10 @@ function runtimeState(overrides: Partial<ScreenObservationRuntimeState> = {}): S
   return {
     settings: {
       enabled: false,
-      mode: 'whitelist',
+      mode: 'desktop',
       allowedApps: [],
+      captureBackend: 'native_frames',
+      frameCaptureIntervalMs: 10_000,
       dailySummaryEnabled: true,
       dailySummaryAtLocalTime: '18:00',
     },
@@ -44,7 +48,7 @@ function taskFixture(id: string): Task {
     schedule: { timezone: 'UTC', dailySummaryAtLocalTime: '18:00' },
     observation: {
       enabled: true,
-      mode: 'whitelist',
+      mode: 'application',
       allowedApps: ['Obsidian'],
       privacyState: 'observing',
       isEffectivelyObserving: true,
@@ -91,7 +95,7 @@ describe('initializeScreenObservationBridge', () => {
   it('hydrates the store from get-state so the runtime wins over renderer-persisted settings', async () => {
     const context = createContext()
     defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState({
-      settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      settings: { enabled: true, mode: 'application', allowedApps: ['Obsidian'], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
       privacyState: 'observing',
       tasks: [taskFixture('task-1')],
     }))
@@ -104,12 +108,31 @@ describe('initializeScreenObservationBridge', () => {
 
     await vi.waitFor(() => {
       expect(store.enabled).toBe(true)
+      expect(store.observationMode).toBe('application')
       expect(store.allowedApps).toEqual(['Obsidian'])
       expect(store.privacyState).toBe('observing')
       expect(store.tasks.map(task => task.id)).toEqual(['task-1'])
     })
 
     dispose()
+  })
+
+  it('exposes the runtime data-folder command through the shared store', async () => {
+    const context = createContext()
+    defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationOpenDataFolder, () => ({ path: 'C:\\Users\\test\\.screenpipe' }))
+    defineInvokeHandler(context, electronScreenObservationSelectDataFolder, () => ({ path: 'D:\\screenpipe-data' }))
+
+    const store = useScreenObservationStore()
+    const dispose = initializeScreenObservationBridge({ context: context as never })
+    await vi.waitFor(() => expect(store.screenpipeAvailable).toBe(true))
+
+    await expect(store.openDataFolder()).resolves.toEqual({ path: 'C:\\Users\\test\\.screenpipe' })
+    await expect(store.selectDataFolder()).resolves.toEqual({ path: 'D:\\screenpipe-data' })
+
+    dispose()
+    await expect(store.openDataFolder()).rejects.toThrow('Screen observation data folder opener is not available in this runtime.')
+    await expect(store.selectDataFolder()).rejects.toThrow('Screen observation data folder picker is not available in this runtime.')
   })
 
   it('pushes user settings edits through update-settings and stays silent on the echoed state', async () => {
@@ -122,7 +145,7 @@ describe('initializeScreenObservationBridge', () => {
       const settings = { ...runtimeState().settings, ...requested }
       return runtimeState({
         settings,
-        privacyState: settings.enabled && settings.allowedApps.length > 0 ? 'observing' : settings.enabled ? 'not_observing_empty_whitelist' : 'disabled',
+        privacyState: settings.enabled && (settings.mode === 'desktop' || settings.allowedApps.length > 0) ? 'observing' : settings.enabled ? 'not_observing_empty_whitelist' : 'disabled',
       })
     })
 
@@ -133,11 +156,13 @@ describe('initializeScreenObservationBridge', () => {
     await vi.waitFor(() => expect(store.screenpipeAvailable).toBe(true))
 
     store.enabled = true
+    store.observationMode = 'application'
     store.allowedApps = ['Obsidian']
+    store.screenpipeDataDirectory = 'D:\\screenpipe-data'
 
     await vi.waitFor(() => {
       expect(received).toHaveLength(1)
-      expect(received[0]).toMatchObject({ enabled: true, allowedApps: ['Obsidian'] })
+      expect(received[0]).toMatchObject({ enabled: true, mode: 'application', allowedApps: ['Obsidian'], screenpipeDataDirectory: 'D:\\screenpipe-data' })
       expect(store.privacyState).toBe('observing')
     })
 
@@ -205,14 +230,16 @@ describe('initializeScreenObservationBridge', () => {
     await vi.waitFor(() => expect(store.screenpipeAvailable).toBe(true))
 
     context.emit(electronScreenObservationStateChanged, runtimeState({
-      settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      settings: { enabled: true, mode: 'application', allowedApps: ['Obsidian'], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
       privacyState: 'suppressed_meeting',
+      latestSummaryAt: '2026-06-11T11:55:00.000Z',
     }))
     context.emit(electronScreenObservationSummaryCaptured, { summary: summaryFixture('s-1') })
     context.emit(electronScreenObservationTouchDelivered, touchFixture('t-1'))
 
     await vi.waitFor(() => {
       expect(store.privacyState).toBe('suppressed_meeting')
+      expect(store.latestSummaryAt).toBe('2026-06-11T12:00:00.000Z')
       expect(store.observationLog.map(entry => entry.id)).toEqual(['s-1'])
       expect(store.latestTouches.map(entry => entry.id)).toEqual(['t-1'])
     })
@@ -223,11 +250,15 @@ describe('initializeScreenObservationBridge', () => {
 
 describe('observationSettingsKey', () => {
   it('treats identical settings as equal and any field change as different', () => {
-    const base: ScreenObservationSettings = { enabled: true, mode: 'whitelist', allowedApps: ['a'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' }
+    const base: ScreenObservationSettings = { enabled: true, mode: 'application', allowedApps: ['a'], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' }
 
     expect(observationSettingsKey({ ...base, allowedApps: ['a'] })).toBe(observationSettingsKey(base))
     expect(observationSettingsKey({ ...base, allowedApps: ['a', 'b'] })).not.toBe(observationSettingsKey(base))
+    expect(observationSettingsKey({ ...base, mode: 'desktop' })).not.toBe(observationSettingsKey(base))
     expect(observationSettingsKey({ ...base, enabled: false })).not.toBe(observationSettingsKey(base))
     expect(observationSettingsKey({ ...base, dailySummaryAtLocalTime: '19:00' })).not.toBe(observationSettingsKey(base))
+    expect(observationSettingsKey({ ...base, captureBackend: 'screenpipe' })).not.toBe(observationSettingsKey(base))
+    expect(observationSettingsKey({ ...base, frameCaptureIntervalMs: 20_000 })).not.toBe(observationSettingsKey(base))
+    expect(observationSettingsKey({ ...base, screenpipeDataDirectory: 'D:\\screenpipe-data' })).not.toBe(observationSettingsKey(base))
   })
 })

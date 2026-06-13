@@ -1,7 +1,7 @@
-import type { ScreenObserverSummary, TouchEventPayload } from '@proj-airi/server-sdk-shared'
+import type { ScreenObservationSnapshot, ScreenObserverSummary, TouchEventPayload } from '@proj-airi/server-sdk-shared'
 
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { privacyStateLabelKey, provisionalPrivacyState, useScreenObservationStore } from './screen-observation'
 
@@ -9,23 +9,29 @@ const now = new Date('2026-06-11T12:00:00.000Z')
 
 describe('provisionalPrivacyState', () => {
   it('reports disabled while the master switch is off, regardless of whitelist', () => {
-    expect(provisionalPrivacyState({ enabled: false, allowedApps: [], now })).toBe('disabled')
-    expect(provisionalPrivacyState({ enabled: false, allowedApps: ['obsidian'], now })).toBe('disabled')
+    expect(provisionalPrivacyState({ enabled: false, mode: 'desktop', allowedApps: [], now })).toBe('disabled')
+    expect(provisionalPrivacyState({ enabled: false, mode: 'application', allowedApps: ['obsidian'], now })).toBe('disabled')
   })
 
-  it('treats an enabled switch with an empty whitelist as the explicit not-observing dead-state', () => {
-    expect(provisionalPrivacyState({ enabled: true, allowedApps: [], now })).toBe('not_observing_empty_whitelist')
+  it('observes in desktop mode without requiring selected apps', () => {
+    expect(provisionalPrivacyState({ enabled: true, mode: 'desktop', allowedApps: [], now })).toBe('observing')
+  })
+
+  it('treats application mode without apps as the explicit not-observing dead-state', () => {
+    expect(provisionalPrivacyState({ enabled: true, mode: 'application', allowedApps: [], now })).toBe('not_observing_empty_whitelist')
   })
 
   it('reports paused only while pauseUntil is in the future', () => {
     expect(provisionalPrivacyState({
       enabled: true,
+      mode: 'desktop',
       allowedApps: ['obsidian'],
       pauseUntil: '2026-06-11T13:00:00.000Z',
       now,
     })).toBe('paused')
     expect(provisionalPrivacyState({
       enabled: true,
+      mode: 'desktop',
       allowedApps: ['obsidian'],
       pauseUntil: '2026-06-11T11:00:00.000Z',
       now,
@@ -33,7 +39,7 @@ describe('provisionalPrivacyState', () => {
   })
 
   it('reports observing when enabled with a non-empty whitelist and no pause', () => {
-    expect(provisionalPrivacyState({ enabled: true, allowedApps: ['obsidian'], now })).toBe('observing')
+    expect(provisionalPrivacyState({ enabled: true, mode: 'application', allowedApps: ['obsidian'], now })).toBe('observing')
   })
 })
 
@@ -84,27 +90,55 @@ describe('useScreenObservationStore appliers', () => {
     store.allowedApps = ['stale-local-app']
 
     store.applyRuntimeState({
-      settings: { enabled: false, mode: 'whitelist', allowedApps: [], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      settings: { enabled: false, mode: 'desktop', allowedApps: [], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00', screenpipeDataDirectory: 'C:\\screenpipe-data' },
       privacyState: 'disabled',
       screenpipeAvailable: true,
+      nativeCaptureStatus: { running: true, sourceCount: 2, lastFrameAt: '2026-06-11T12:00:00.000Z' },
+      latestSummaryAt: '2026-06-11T12:00:00.000Z',
     })
 
     expect(store.enabled).toBe(false)
     expect(store.allowedApps).toEqual([])
+    expect(store.observationMode).toBe('desktop')
     expect(store.privacyState).toBe('disabled')
     expect(store.screenpipeAvailable).toBe(true)
+    expect(store.captureBackend).toBe('native_frames')
+    expect(store.frameCaptureIntervalMs).toBe(10_000)
+    expect(store.nativeCaptureStatus?.sourceCount).toBe(2)
+    expect(store.latestSummaryAt).toBe('2026-06-11T12:00:00.000Z')
+    expect(store.screenpipeDataDirectory).toBe('C:\\screenpipe-data')
   })
 
   it('applyRuntimeState surfaces the runtime-resolved suppression states the renderer cannot derive', () => {
     const store = useScreenObservationStore()
 
     store.applyRuntimeState({
-      settings: { enabled: true, mode: 'whitelist', allowedApps: ['obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      settings: { enabled: true, mode: 'application', allowedApps: ['obsidian'], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
       privacyState: 'suppressed_meeting',
     })
 
     expect(store.privacyState).toBe('suppressed_meeting')
+    expect(store.observationMode).toBe('application')
     expect(store.isEffectivelyObserving).toBe(false)
+  })
+
+  it('applySnapshot derives the latest summary timestamp from the snapshot log', () => {
+    const store = useScreenObservationStore()
+
+    const snapshot: ScreenObservationSnapshot = {
+      settings: { enabled: true, mode: 'desktop', allowedApps: [], captureBackend: 'native_frames', frameCaptureIntervalMs: 10_000, dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      tasks: [],
+      latestSummaries: [
+        summaryFixture('s-1', '2026-06-11T12:00:00.000Z'),
+        summaryFixture('s-2', '2026-06-11T12:05:00.000Z'),
+      ],
+      latestTouches: [],
+      privacyState: 'observing',
+    }
+
+    store.applySnapshot(snapshot)
+
+    expect(store.latestSummaryAt).toBe('2026-06-11T12:05:00.000Z')
   })
 
   it('applySummary prepends new entries and replaces redelivered duplicates by id', () => {
@@ -113,11 +147,13 @@ describe('useScreenObservationStore appliers', () => {
     store.applySummary(summaryFixture('s-1'))
     store.applySummary(summaryFixture('s-2'))
     expect(store.observationLog.map(entry => entry.id)).toEqual(['s-2', 's-1'])
+    expect(store.latestSummaryAt).toBe('2026-06-11T12:00:00.000Z')
 
-    const redelivered = { ...summaryFixture('s-1'), summary: 'updated digest' }
+    const redelivered = { ...summaryFixture('s-1', '2026-06-11T12:05:00.000Z'), summary: 'updated digest' }
     store.applySummary(redelivered)
     expect(store.observationLog.map(entry => entry.id)).toEqual(['s-1', 's-2'])
     expect(store.observationLog[0]!.summary).toBe('updated digest')
+    expect(store.latestSummaryAt).toBe('2026-06-11T12:05:00.000Z')
   })
 
   it('applyTouch prepends and dedupes by id', () => {
@@ -128,5 +164,37 @@ describe('useScreenObservationStore appliers', () => {
     store.applyTouch(touchFixture('t-1'))
 
     expect(store.latestTouches.map(entry => entry.id)).toEqual(['t-1', 't-2'])
+  })
+
+  it('delegates opening the data folder to the runtime-provided handler', async () => {
+    const store = useScreenObservationStore()
+    const openDataFolder = vi.fn(async () => ({ path: 'C:\\Users\\test\\.screenpipe' }))
+
+    store.setOpenDataFolderHandler(openDataFolder)
+
+    await expect(store.openDataFolder()).resolves.toEqual({ path: 'C:\\Users\\test\\.screenpipe' })
+    expect(openDataFolder).toHaveBeenCalledTimes(1)
+  })
+
+  it('delegates selecting the data folder to the runtime-provided handler', async () => {
+    const store = useScreenObservationStore()
+    const selectDataFolder = vi.fn(async () => ({ path: 'D:\\screenpipe-data' }))
+
+    store.setSelectDataFolderHandler(selectDataFolder)
+
+    await expect(store.selectDataFolder()).resolves.toEqual({ path: 'D:\\screenpipe-data' })
+    expect(selectDataFolder).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails clearly when no runtime data-folder opener is registered', async () => {
+    const store = useScreenObservationStore()
+
+    await expect(store.openDataFolder()).rejects.toThrow('Screen observation data folder opener is not available in this runtime.')
+  })
+
+  it('fails clearly when no runtime data-folder picker is registered', async () => {
+    const store = useScreenObservationStore()
+
+    await expect(store.selectDataFolder()).rejects.toThrow('Screen observation data folder picker is not available in this runtime.')
   })
 })

@@ -11,7 +11,9 @@ import { storeToRefs } from 'pinia'
 
 import {
   electronScreenObservationGetState,
+  electronScreenObservationOpenDataFolder,
   electronScreenObservationOpenTaskDetails,
+  electronScreenObservationSelectDataFolder,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -28,10 +30,19 @@ import {
  * Only a genuine user edit makes the keys diverge and triggers a push.
  */
 export function observationSettingsKey(settings: ScreenObservationSettings): string {
-  return JSON.stringify([settings.enabled, settings.allowedApps, settings.dailySummaryEnabled, settings.dailySummaryAtLocalTime])
+  return JSON.stringify([
+    settings.enabled,
+    settings.mode,
+    settings.allowedApps,
+    settings.captureBackend,
+    settings.frameCaptureIntervalMs,
+    settings.dailySummaryEnabled,
+    settings.dailySummaryAtLocalTime,
+    settings.screenpipeDataDirectory ?? '',
+  ])
 }
 
-// Batches rapid settings edits (whitelist typing, toggle flurries) into one
+// Batches rapid settings edits (mode switches, app-list typing, toggle flurries) into one
 // update-settings invoke; low enough that the tray state never feels laggy.
 const SETTINGS_PUSH_DEBOUNCE_MS = 300
 
@@ -70,10 +81,14 @@ export interface ScreenObservationBridgeOptions {
 export function initializeScreenObservationBridge(options: ScreenObservationBridgeOptions = {}) {
   const context = options.context ?? getElectronEventaContext()
   const store = useScreenObservationStore()
-  const { enabled, allowedApps, dailySummaryEnabled, dailySummaryAtLocalTime } = storeToRefs(store)
+  const { enabled, observationMode, allowedApps, captureBackend, frameCaptureIntervalMs, dailySummaryEnabled, dailySummaryAtLocalTime, screenpipeDataDirectory } = storeToRefs(store)
 
   const getState = defineInvoke(context, electronScreenObservationGetState)
   const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+  const openDataFolder = defineInvoke(context, electronScreenObservationOpenDataFolder)
+  const selectDataFolder = defineInvoke(context, electronScreenObservationSelectDataFolder)
+  store.setOpenDataFolderHandler(() => openDataFolder())
+  store.setSelectDataFolderHandler(() => selectDataFolder())
 
   let lastKnownRemoteKey: string | undefined
 
@@ -85,10 +100,13 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   function currentLocalSettings(): ScreenObservationSettings {
     return {
       enabled: enabled.value,
-      mode: 'whitelist',
+      mode: observationMode.value,
       allowedApps: [...allowedApps.value],
+      captureBackend: captureBackend.value,
+      frameCaptureIntervalMs: frameCaptureIntervalMs.value,
       dailySummaryEnabled: dailySummaryEnabled.value,
       dailySummaryAtLocalTime: dailySummaryAtLocalTime.value,
+      screenpipeDataDirectory: screenpipeDataDirectory.value,
     }
   }
 
@@ -114,7 +132,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
     .catch(error => console.warn('[screen-observation] failed to hydrate runtime state:', error))
 
   const stopSettingsWatcher = watchDebounced(
-    [enabled, allowedApps, dailySummaryEnabled, dailySummaryAtLocalTime],
+    [enabled, observationMode, allowedApps, captureBackend, frameCaptureIntervalMs, dailySummaryEnabled, dailySummaryAtLocalTime, screenpipeDataDirectory],
     async () => {
       const local = currentLocalSettings()
       if (observationSettingsKey(local) === lastKnownRemoteKey)
@@ -166,5 +184,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
     offSummaryCaptured()
     offTouchDelivered()
     offOpenTaskDetails()
+    store.setOpenDataFolderHandler(undefined)
+    store.setSelectDataFolderHandler(undefined)
   }
 }

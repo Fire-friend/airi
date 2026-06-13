@@ -14,8 +14,15 @@ import {
 const now = new Date('2026-06-11T10:00:00.000Z')
 
 describe('screen observer desktop runtime decisions', () => {
-  it('treats an empty whitelist as explicitly not observing, even with the switch on', () => {
+  it('observes in desktop mode without requiring selected apps', () => {
     const state = resolveObservationPrivacyState({ enabled: true, allowedApps: [], now })
+
+    expect(state).toBe('observing')
+    expect(shouldCaptureScreen(state)).toBe(true)
+  })
+
+  it('treats application mode without apps as explicitly not observing', () => {
+    const state = resolveObservationPrivacyState({ enabled: true, mode: 'application', allowedApps: [], now })
 
     expect(state).toBe('not_observing_empty_whitelist')
     expect(shouldCaptureScreen(state)).toBe(false)

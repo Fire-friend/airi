@@ -12,7 +12,7 @@ import type { ScreenObserverAppSummary } from '@proj-airi/server-sdk-shared'
  */
 
 export interface ScreenpipeClientOptions {
-  /** @default 'http://127.0.0.1:3030' */
+  /** @default 'http://localhost:3030' */
   baseUrl?: string
   /** Injected for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch
@@ -36,11 +36,10 @@ export interface FocusedWindowMeta {
 
 export interface SearchOcrParams {
   /**
-   * The whitelisted app to query. Required by design: the client cannot
-   * express an unscoped OCR text query, so non-whitelisted apps' text can
-   * never be requested in the first place.
+   * App name for application mode. Omit in desktop mode to query the whole
+   * local OCR stream exposed by screenpipe.
    */
-  appName: string
+  appName?: string
   /** ISO timestamp, inclusive window start. */
   startTime: string
   /** ISO timestamp, inclusive window end. */
@@ -62,7 +61,7 @@ export interface SearchOcrResult {
 export interface ScreenpipeClient {
   /** True when the local screenpipe service answers its health endpoint. */
   health: () => Promise<boolean>
-  /** OCR captures within a time window, always scoped to a single whitelisted app; paginates through the window up to a page cap. */
+  /** OCR captures within a time window; paginates through the window up to a page cap. */
   searchOcr: (params: SearchOcrParams) => Promise<SearchOcrResult>
   /**
    * App name / window title of the most recent capture, for meeting and
@@ -109,7 +108,7 @@ const SEARCH_MAX_PAGES = 5
  * - `health()` false and empty results on any network/parse failure.
  */
 export function createScreenpipeClient(options?: ScreenpipeClientOptions): ScreenpipeClient {
-  const baseUrl = (options?.baseUrl ?? 'http://127.0.0.1:3030').replace(/\/$/, '')
+  const baseUrl = (options?.baseUrl ?? 'http://localhost:3030').replace(/\/$/, '')
   const fetchImpl = options?.fetchImpl ?? globalThis.fetch
   const requestTimeoutMs = options?.requestTimeoutMs ?? 5000
 
@@ -174,12 +173,13 @@ export function createScreenpipeClient(options?: ScreenpipeClientOptions): Scree
       for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
         const query = new URLSearchParams({
           content_type: 'ocr',
-          app_name: params.appName,
           start_time: params.startTime,
           end_time: params.endTime,
           limit: String(limit),
           offset: String(page * limit),
         })
+        if (params.appName)
+          query.set('app_name', params.appName)
         const pageItems = toItems(await request(`/search?${query.toString()}`))
         items.push(...pageItems)
         // A short page means the window is exhausted.
@@ -222,15 +222,15 @@ const APP_DIGEST_TEXT_LIMIT = 160
  * whitelisted apps, so no future caller can widen the capture scope through
  * this function.
  */
-export function aggregateAppSummaries(items: ScreenpipeOcrItem[], allowedApps: string[]): ScreenObserverAppSummary[] {
-  const allowed = new Set(allowedApps.map(app => app.toLowerCase()))
+export function aggregateAppSummaries(items: ScreenpipeOcrItem[], allowedApps?: string[]): ScreenObserverAppSummary[] {
+  const allowed = allowedApps ? new Set(allowedApps.map(app => app.toLowerCase())) : undefined
   const byApp = new Map<string, ScreenpipeOcrItem[]>()
 
   for (const item of items) {
     const key = item.appName.toLowerCase()
     // Second enforcement of the capture boundary: anything that slipped past
     // the per-app queries is dropped here, not flagged and passed along.
-    if (!allowed.has(key))
+    if (allowed && !allowed.has(key))
       continue
     const bucket = byApp.get(key)
     if (bucket)
@@ -276,7 +276,7 @@ export function aggregateAppSummaries(items: ScreenpipeOcrItem[], allowedApps: s
       windowTitle,
       observedSeconds,
       summary,
-      matchedWhitelist: true,
+      matchedWhitelist: Boolean(allowed),
     }
   })
 }

@@ -15,7 +15,15 @@ function ocrItem(overrides: Partial<ScreenpipeOcrItem>): ScreenpipeOcrItem {
 }
 
 describe('screenpipe client', () => {
-  it('parses /search responses into reduced OCR items and always scopes the query to one app', async () => {
+  it('uses localhost by default so screenpipe can answer on IPv6 loopback', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'healthy' })))
+    const client = createScreenpipeClient({ fetchImpl: fetchImpl as unknown as typeof fetch })
+
+    expect(await client.health()).toBe(true)
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe('http://localhost:3030/health')
+  })
+
+  it('parses /search responses into reduced OCR items and can scope the query to one app', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [
         { type: 'OCR', content: { app_name: 'Code', window_name: 'main.ts', text: 'hello', timestamp: '2026-06-11T10:00:01.000Z', focused: true } },
@@ -32,13 +40,27 @@ describe('screenpipe client', () => {
     expect(items[0]!.appName).toBe('Code')
     expect(items[0]!.windowName).toBe('main.ts')
 
-    // The capture boundary at the transport level: every OCR text query
-    // carries app_name (SearchOcrParams.appName is required, so an unscoped
-    // text query is not even expressible).
     const requestedUrl = String(fetchImpl.mock.calls[0]![0])
     expect(requestedUrl).toContain('/search?')
     expect(requestedUrl).toContain('content_type=ocr')
     expect(requestedUrl).toContain('app_name=Code')
+  })
+
+  it('omits app_name for desktop-mode OCR queries', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [
+        { type: 'OCR', content: { app_name: 'Code', window_name: 'main.ts', text: 'hello', timestamp: '2026-06-11T10:00:01.000Z' } },
+      ],
+    })))
+
+    const client = createScreenpipeClient({ fetchImpl: fetchImpl as unknown as typeof fetch })
+    const { items, complete } = await client.searchOcr({ startTime: '2026-06-11T09:59:00.000Z', endTime: '2026-06-11T10:00:30.000Z' })
+
+    expect(items).toHaveLength(1)
+    expect(complete).toBe(true)
+    const requestedUrl = String(fetchImpl.mock.calls[0]![0])
+    expect(requestedUrl).toContain('content_type=ocr')
+    expect(requestedUrl).not.toContain('app_name=')
   })
 
   it('materializes only window metadata from the focused-window probe, never OCR text', async () => {
@@ -160,6 +182,16 @@ describe('aggregateAppSummaries', () => {
     expect(summaries).toHaveLength(1)
     expect(summaries[0]!.appId).toBe('code')
     expect(summaries[0]!.matchedWhitelist).toBe(true)
+  })
+
+  it('keeps all observed apps when no application filter is provided', () => {
+    const summaries = aggregateAppSummaries([
+      ocrItem({ appName: 'Code' }),
+      ocrItem({ appName: 'Slack', windowName: 'general', text: 'standup notes' }),
+    ])
+
+    expect(summaries.map(summary => summary.appName).sort()).toEqual(['Code', 'Slack'])
+    expect(summaries.every(summary => summary.matchedWhitelist === false)).toBe(true)
   })
 
   it('returns an empty list for no observations', () => {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { ScreenObserverSummary } from '@proj-airi/server-sdk-shared'
+import type { ScreenObservationContextType, ScreenObserverSummary } from '@proj-airi/server-sdk-shared'
 
-import { Button, Callout, FieldCheckbox, FieldInput, FieldValues, TransitionVertical } from '@proj-airi/ui'
+import { Button, Callout, FieldCheckbox, FieldInput, FieldRange, FieldValues, TransitionVertical } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -14,22 +14,43 @@ const tn = (key: string, params?: Record<string, unknown>) => t(`settings.pages.
 const store = useScreenObservationStore()
 const {
   enabled,
+  observationMode,
   allowedApps,
+  frameCaptureIntervalMs,
   dailySummaryEnabled,
   dailySummaryAtLocalTime,
   autoPauseOnFocus,
   onboardingCompleted,
   observationLog,
   privacyState,
+  nativeCaptureStatus,
   statusLabelKey,
   tasks,
+  latestSummaryAt,
 } = storeToRefs(store)
 
 const showOnboarding = computed(() => enabled.value && !onboardingCompleted.value)
+const observationAction = computed(() => enabled.value
+  ? {
+      icon: 'i-solar:stop-circle-bold-duotone',
+      label: tn('actions.stop'),
+      variant: 'danger' as const,
+    }
+  : {
+      icon: 'i-solar:play-circle-bold-duotone',
+      label: tn('actions.start'),
+      variant: 'primary' as const,
+    })
+const useApplicationMode = computed({
+  get: () => observationMode.value === 'application',
+  set: (value: boolean) => {
+    observationMode.value = value ? 'application' : 'desktop'
+  },
+})
+const showApplicationList = computed(() => enabled.value && useApplicationMode.value)
 
-// The empty-whitelist dead-state ("switch on but nothing watched") is the
-// most trust-damaging silent state — it must be loudly visible, never implied.
-const showEmptyWhitelistWarning = computed(() => privacyState.value === 'not_observing_empty_whitelist')
+// Application mode without apps is the only enabled-but-not-observing state.
+const showEmptyWhitelistWarning = computed(() => showApplicationList.value && privacyState.value === 'not_observing_empty_whitelist')
 
 const STATUS_THEME: Record<string, 'primary' | 'violet' | 'lime' | 'orange'> = {
   observing: 'lime',
@@ -41,6 +62,57 @@ const STATUS_THEME: Record<string, 'primary' | 'violet' | 'lime' | 'orange'> = {
 }
 
 const timeFormat = computed(() => new Intl.DateTimeFormat(locale.value, { hour: '2-digit', minute: '2-digit', hour12: false }))
+const dateTimeFormat = computed(() => new Intl.DateTimeFormat(locale.value, {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+}))
+
+const latestSummaryTime = computed(() => latestSummaryAt.value
+  ? dateTimeFormat.value.format(new Date(latestSummaryAt.value))
+  : undefined)
+
+const runtimeStatusKey = computed(() => {
+  if (!enabled.value)
+    return 'runtime.disabled'
+  if (privacyState.value === 'not_observing_empty_whitelist')
+    return 'runtime.waiting-for-apps'
+  if (privacyState.value === 'paused')
+    return 'runtime.paused'
+  if (privacyState.value === 'suppressed_fullscreen')
+    return 'runtime.suppressed-fullscreen'
+  if (privacyState.value === 'suppressed_meeting')
+    return 'runtime.suppressed-meeting'
+  if (nativeCaptureStatus.value?.lastError && !nativeCaptureStatus.value.lastInterpretationAt)
+    return 'runtime.native-error'
+  if (latestSummaryAt.value)
+    return 'runtime.native-observed'
+  if (nativeCaptureStatus.value?.running)
+    return 'runtime.native-capturing'
+  return 'runtime.native-starting'
+})
+
+const runtimeStatusTheme = computed(() => {
+  if (runtimeStatusKey.value === 'runtime.native-observed')
+    return 'lime'
+  if (runtimeStatusKey.value === 'runtime.waiting-for-apps' || runtimeStatusKey.value === 'runtime.native-error')
+    return 'orange'
+  if (runtimeStatusKey.value === 'runtime.paused' || runtimeStatusKey.value.startsWith('runtime.suppressed-'))
+    return 'violet'
+  return 'primary'
+})
+
+const runtimeStatusLabel = computed(() => tn(runtimeStatusKey.value, {
+  time: latestSummaryTime.value,
+  count: nativeCaptureStatus.value?.sourceCount ?? 0,
+  error: nativeCaptureStatus.value?.lastError ?? '',
+}))
+
+function toggleObservation() {
+  enabled.value = !enabled.value
+}
 
 function logTimeRange(entry: ScreenObserverSummary) {
   return `${timeFormat.value.format(new Date(entry.windowStartedAt))} – ${timeFormat.value.format(new Date(entry.windowEndedAt))}`
@@ -52,12 +124,16 @@ function logPurpose(entry: ScreenObserverSummary) {
 }
 
 function logApps(entry: ScreenObserverSummary) {
-  return entry.apps.map(app => app.appName).join('、')
+  return entry.apps.map(app => app.appName).join(', ')
+}
+
+function logContextType(type: ScreenObservationContextType) {
+  return type.replace(/_context$/u, '').replaceAll('_', ' ')
 }
 
 // TODO: wire to the desktop runtime over Eventa once the Electron main
-// process ScreenObserver lands — must also purge the matching screenpipe
-// data on disk, not only the renderer-side digest log.
+// process ScreenObserver lands — must also purge matching runtime-owned
+// observation data, not only the renderer-side digest log.
 function deleteTodayLog() {
   observationLog.value = []
 }
@@ -69,11 +145,33 @@ function deleteTodayLog() {
       {{ t(statusLabelKey) }}
     </Callout>
 
-    <FieldCheckbox
-      v-model="enabled"
-      :label="tn('enable.label')"
-      :description="tn('enable.description')"
-    />
+    <section
+      :class="[
+        'flex flex-col gap-3 rounded-lg px-3 py-3',
+        'bg-neutral-50/80 dark:bg-neutral-900/40',
+        'sm:flex-row sm:items-center sm:justify-between',
+      ]"
+    >
+      <div class="flex flex-col gap-1">
+        <h3 class="m-0 text-sm font-semibold">
+          {{ tn('enable.label') }}
+        </h3>
+        <p class="m-0 text-xs text-neutral-500 dark:text-neutral-400">
+          {{ tn('enable.description') }}
+        </p>
+      </div>
+      <Button
+        size="sm"
+        :variant="observationAction.variant"
+        :icon="observationAction.icon"
+        :label="observationAction.label"
+        @click="toggleObservation"
+      />
+    </section>
+
+    <Callout :theme="runtimeStatusTheme" :label="tn('runtime.title')">
+      {{ runtimeStatusLabel }}
+    </Callout>
 
     <TransitionVertical>
       <section
@@ -99,15 +197,36 @@ function deleteTodayLog() {
 
     <template v-if="enabled">
       <section flex="~ col gap-3">
+        <FieldCheckbox
+          v-model="useApplicationMode"
+          :label="tn('application-mode.label')"
+          :description="tn('application-mode.description')"
+        />
+
         <Callout v-if="showEmptyWhitelistWarning" theme="orange" :label="tn('whitelist.empty-title')">
           {{ tn('status.not-observing-empty-whitelist') }}
         </Callout>
 
-        <FieldValues
-          v-model="allowedApps"
-          :label="tn('whitelist.label')"
-          :description="tn('whitelist.description')"
-          :value-placeholder="tn('whitelist.placeholder')"
+        <TransitionVertical>
+          <FieldValues
+            v-if="showApplicationList"
+            v-model="allowedApps"
+            :label="tn('whitelist.label')"
+            :description="tn('whitelist.description')"
+            :value-placeholder="tn('whitelist.placeholder')"
+          />
+        </TransitionVertical>
+      </section>
+
+      <section flex="~ col gap-3">
+        <FieldRange
+          v-model="frameCaptureIntervalMs"
+          :label="tn('capture.interval-label')"
+          :description="tn('capture.interval-description')"
+          :min="2000"
+          :max="60000"
+          :step="1000"
+          :format-value="value => `${(value / 1000).toFixed(0)}s`"
         />
       </section>
 
@@ -187,26 +306,29 @@ function deleteTodayLog() {
             <div class="text-xs text-neutral-600 dark:text-neutral-300">
               {{ entry.summary }}
             </div>
+            <div v-if="entry.contexts?.length" :class="['mt-1 flex flex-col gap-1']">
+              <div
+                v-for="context in entry.contexts.slice(0, 3)"
+                :key="context.id"
+                :class="[
+                  'border-l-2 border-primary-300 pl-2',
+                  'dark:border-primary-700',
+                ]"
+              >
+                <div class="flex items-center justify-between gap-2 text-[11px] text-primary-600 uppercase dark:text-primary-300">
+                  <span>{{ logContextType(context.contextType) }}</span>
+                  <span>{{ Math.round(context.confidence * 100) }}%</span>
+                </div>
+                <div class="text-xs text-neutral-700 font-medium dark:text-neutral-200">
+                  {{ context.title }}
+                </div>
+                <div class="text-xs text-neutral-500 dark:text-neutral-400">
+                  {{ context.summary }}
+                </div>
+              </div>
+            </div>
           </li>
         </ul>
-      </section>
-
-      <section
-        :class="[
-          'flex items-center justify-between gap-3 rounded-lg px-3 py-2',
-          'bg-neutral-50/80 dark:bg-neutral-900/40',
-        ]"
-      >
-        <p class="m-0 text-xs text-neutral-500 dark:text-neutral-400">
-          {{ tn('data.statement') }}
-        </p>
-        <!-- TODO: enable via Eventa once the desktop runtime exposes the
-             screenpipe data directory; the renderer alone cannot open it. -->
-        <Button
-          variant="secondary" size="sm"
-          icon="i-solar:folder-open-bold-duotone" :label="tn('data.open-folder')"
-          disabled
-        />
       </section>
     </template>
   </div>

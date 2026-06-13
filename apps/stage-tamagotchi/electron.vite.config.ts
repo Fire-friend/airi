@@ -101,6 +101,7 @@ export default defineConfig({
         input: {
           'main': resolve(join(import.meta.dirname, 'src', 'renderer', 'index.html')),
           'beat-sync': resolve(join(import.meta.dirname, 'src', 'renderer', 'beat-sync.html')),
+          'screen-observation-capture': resolve(join(import.meta.dirname, 'src', 'renderer', 'screen-observation-capture.html')),
         },
       },
     },

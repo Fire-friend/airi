@@ -858,26 +858,52 @@ pages:
         restarted: All restarted! {started} started, {failed} failed, {skipped} skipped.
     screen-observation:
       title: Screen observation
-      description: Let AIRI watch selected apps to follow your task progress — privately, on your terms.
+      description: Let AIRI observe your connected desktop screens to follow task progress — privately, on your terms.
       status-title: Current state
       status:
-        observing: 'Observing: only the apps you whitelisted, for your active tasks.'
+        observing: 'Observing: connected desktop screens are being summarized for your active tasks.'
         paused: Observation is paused. It will resume automatically.
-        not-observing-empty-whitelist: No apps selected — nothing is being observed right now.
+        not-observing-empty-whitelist: Application mode is on, but no apps are selected — nothing is being observed right now.
         suppressed-fullscreen: Paused automatically while a fullscreen app is active. A recap will follow afterwards.
         suppressed-meeting: Paused automatically during your meeting. A recap will follow afterwards.
         disabled: Screen observation is off. Nothing is being watched.
       enable:
         label: Enable screen observation
-        description: Off by default. AIRI only ever sees apps you explicitly whitelist below.
+        description: Off by default. When enabled, AIRI observes the desktop screens connected to this device.
+      actions:
+        start: Start observing
+        stop: Stop observing
+      runtime:
+        title: Observation runtime
+        disabled: Not started.
+        checking: Checking screenpipe...
+        unavailable: screenpipe is not available yet.
+        connected: screenpipe is connected; waiting for the first observation summary.
+        observed: 'Last successful observation summary: {time}.'
+        native-starting: Starting the internal frame observer...
+        native-capturing: 'Internal frame observer is capturing {count} source(s); waiting for the first interpretation.'
+        native-observed: 'Last native frame interpretation: {time}.'
+        native-error: 'Internal frame observer needs attention: {error}'
+        waiting-for-apps: Application mode needs at least one app before observation can start.
+        paused: Observation is paused. It will resume automatically.
+        suppressed-fullscreen: Observation is temporarily paused while a fullscreen app is active.
+        suppressed-meeting: Observation is temporarily paused during your meeting.
       onboarding:
-        what-it-sees: It only reads the apps you whitelist — never passwords or private browsing.
-        where-data-goes: Recordings stay on this machine in screenpipe; only short digests reach the model.
+        what-it-sees: Desktop mode captures timed frames from the connected screens.
+        where-data-goes: Native observation keeps no video chunks; only frame interpretations become AIRI context.
         how-to-pause: Pause anytime from the tray, with one click or a global shortcut.
         confirm: I understand
+      application-mode:
+        label: Only observe specific apps
+        description: Special application mode. Leave off to observe the connected desktop screens by default.
+      capture:
+        interval-label: Frame interval
+        interval-description: How often AIRI captures and interprets each selected screen source.
+        legacy-screenpipe-label: Use legacy screenpipe recorder
+        legacy-screenpipe-description: Optional compatibility mode. Native frame observation is recommended because it does not create video chunks.
       whitelist:
         label: Apps to observe
-        description: Whitelist mode — AIRI only sees what you put on this list.
+        description: Application mode — AIRI only keeps observations from apps on this list.
         placeholder: e.g. Obsidian
         empty-title: Not observing
       auto-pause:
@@ -898,6 +924,11 @@ pages:
         empty: Nothing observed today.
       data:
         statement: Recordings are stored locally by screenpipe; only digests are sent to the model.
+        directory-label: screenpipe storage folder
+        directory-description: AIRI starts screenpipe with this folder as --data-dir. Leave empty to use the default storage folder.
+        directory-placeholder: 'Default: ~/.screenpipe'
+        choose-folder: Choose folder
+        reset-folder: Use default
         open-folder: Open data folder
   flux:
     title: Flux

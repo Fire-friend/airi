@@ -822,26 +822,52 @@ pages:
         restarted: 重启好啦！启动了 {started} 个，失败 {failed} 个，跳过 {skipped} 个
     screen-observation:
       title: 屏幕观察
-      description: 让 AIRI 观察你选定的应用、安静地跟进任务进度——隐私由你掌控。
+      description: 让 AIRI 观察这台设备接入的桌面屏幕，安静地跟进任务进度——隐私由你掌控。
       status-title: 当前状态
       status:
-        observing: 正在观察：只看你加入白名单的应用，用于进行中的任务。
+        observing: 正在观察：接入的桌面屏幕会被本地概括，用于进行中的任务。
         paused: 观察已暂停，到时间会自动恢复。
-        not-observing-empty-whitelist: 未选择任何应用，当前未在观察。
+        not-observing-empty-whitelist: 已开启应用模式，但未选择任何应用，当前未在观察。
         suppressed-fullscreen: 检测到全屏应用，已自动暂停，结束后会补一份小结。
         suppressed-meeting: 会议进行中，已自动暂停，结束后会补一份小结。
         disabled: 屏幕观察已关闭，没有任何内容被观察。
       enable:
         label: 启用屏幕观察
-        description: 默认关闭。AIRI 只会看你在下方白名单里明确选择的应用。
+        description: 默认关闭。开启后，AIRI 会观察这台设备接入的桌面屏幕。
+      actions:
+        start: 启动观察
+        stop: 关闭观察
+      runtime:
+        title: 观察运行状态
+        disabled: 尚未启动观察。
+        checking: 正在检查 screenpipe...
+        unavailable: screenpipe 暂不可用。
+        connected: screenpipe 已连接，正在等待第一段观察摘要。
+        observed: '最近一次成功观察摘要：{time}。'
+        native-starting: 正在启动内部截帧观察...
+        native-capturing: '内部截帧观察正在捕获 {count} 个来源，等待第一段理解结果。'
+        native-observed: '最近一次内部截帧理解：{time}。'
+        native-error: '内部截帧观察需要处理：{error}'
+        waiting-for-apps: 应用模式需要至少选择一个应用后才会开始观察。
+        paused: 观察已暂停，到时间会自动恢复。
+        suppressed-fullscreen: 检测到全屏应用，观察已临时暂停。
+        suppressed-meeting: 会议进行中，观察已临时暂停。
       onboarding:
-        what-it-sees: 它只读取你加入白名单的应用——密码输入和隐私浏览永远不会被读取。
-        where-data-goes: 录屏数据保存在本机 screenpipe，发往模型的只有摘要。
+        what-it-sees: 桌面模式会按时间间隔截取这台设备接入的屏幕帧。
+        where-data-goes: 内部观察不会生成视频分片，只有帧理解结果会进入 AIRI 上下文。
         how-to-pause: 随时可以从托盘一键暂停，也可以用全局快捷键。
         confirm: 我了解了
+      application-mode:
+        label: 只观察指定应用
+        description: 特殊的应用模式。关闭时默认观察这台设备接入的桌面屏幕。
+      capture:
+        interval-label: 截帧间隔
+        interval-description: AIRI 多久截取并理解一次每个已选择的屏幕来源。
+        legacy-screenpipe-label: 使用旧版 screenpipe 录制器
+        legacy-screenpipe-description: 可选兼容模式。推荐使用内部截帧观察，因为它不会生成视频分片。
       whitelist:
         label: 要观察的应用
-        description: 白名单模式——只有列表里的应用会被 AIRI 看到。
+        description: 应用模式——AIRI 只保留这个列表中的应用观察结果。
         placeholder: 例如 Obsidian
         empty-title: 未在观察
       auto-pause:
@@ -862,6 +888,11 @@ pages:
         empty: 今天还没有观察记录。
       data:
         statement: 录屏数据保存在本机 screenpipe，发往模型的只有摘要。
+        directory-label: screenpipe 存储目录
+        directory-description: AIRI 会把这个目录作为 --data-dir 传给 screenpipe。留空则使用默认存储目录。
+        directory-placeholder: '默认：~/.screenpipe'
+        choose-folder: 选择目录
+        reset-folder: 使用默认
         open-folder: 打开数据文件夹
   flux:
     title: Flux

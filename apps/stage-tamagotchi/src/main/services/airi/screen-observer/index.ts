@@ -9,30 +9,45 @@ import type {
 import type { BrowserWindow } from 'electron'
 import type { BaseIssue, BaseSchema, InferOutput } from 'valibot'
 
-import type { ScreenObservationRuntimeState } from '../../../../shared/eventa/screen-observation'
+import type {
+  NativeScreenObservationCaptureStatus,
+  NativeScreenObservationFrameResult,
+  ScreenObservationRuntimeState,
+} from '../../../../shared/eventa/screen-observation'
 import type { I18n } from '../../../libs/i18n'
 import type { NoticeWindowManager } from '../../../windows/notice'
+import type { NativeScreenObservationCaptureController } from './native-capture'
 import type { TouchInteractionLedgerEntry, TouchOutcome } from './runtime'
 import type { ScreenpipeClient } from './screenpipe'
+import type { ScreenpipeSupervisor } from './supervisor'
 
 import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 import { useLogg } from '@guiiai/logg'
 import { defineInvokeHandler } from '@moeru/eventa'
+import { errorMessageFrom } from '@moeru/std'
 import {
   decideScreenObservationTouch,
   DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
+  DEFAULT_FRAME_CAPTURE_INTERVAL_MS,
+  MAX_FRAME_CAPTURE_INTERVAL_MS,
+  MIN_FRAME_CAPTURE_INTERVAL_MS,
   resolveObservationPrivacyState,
   TOUCH_THROTTLE_WINDOW_MS,
 } from '@proj-airi/server-sdk-shared'
-import { globalShortcut, Notification } from 'electron'
+import { dialog, globalShortcut, Notification, shell } from 'electron'
 import { array, boolean, check, maxLength, minLength, number, object, optional, picklist, pipe, record, regex, safeParse, string, summarize, trim } from 'valibot'
 
 import {
   electronScreenObservationGetState,
+  electronScreenObservationOpenDataFolder,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationPause,
   electronScreenObservationResume,
+  electronScreenObservationSelectDataFolder,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -41,6 +56,8 @@ import {
 } from '../../../../shared/eventa/screen-observation'
 import { onAppBeforeQuit } from '../../../libs/bootkit/lifecycle'
 import { createConfig } from '../../../libs/electron/persistence'
+import { createScreenObservationContextsFromSummary } from './context-engine'
+import { createNativeScreenObservationCapture } from './native-capture'
 import {
   applyTouchOutcome,
   computePauseUntil,
@@ -51,6 +68,7 @@ import {
   shouldCaptureScreen,
 } from './runtime'
 import { aggregateAppSummaries, createScreenpipeClient } from './screenpipe'
+import { createScreenpipeSupervisor } from './supervisor'
 
 type EventaContext = ReturnType<typeof createContext>['context']
 
@@ -61,6 +79,10 @@ type EventaContext = ReturnType<typeof createContext>['context']
  */
 const POLL_INTERVAL_MS = 30 * 1000
 
+const NATIVE_CAPTURE_MAX_WIDTH = 1280
+const NATIVE_CAPTURE_MAX_HEIGHT = 720
+const NATIVE_CAPTURE_JPEG_QUALITY = 0.82
+
 /** Default accelerator for the global "pause observation" shortcut; users can override or clear it in settings. */
 const DEFAULT_PAUSE_SHORTCUT = 'CommandOrControl+Alt+P'
 
@@ -68,9 +90,16 @@ const DEFAULT_PAUSE_SHORTCUT = 'CommandOrControl+Alt+P'
 const LOCAL_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 const isoTimestampSchema = pipe(string(), check(value => Number.isFinite(new Date(value).getTime()), 'expected a parseable ISO timestamp'))
+const frameCaptureIntervalSchema = pipe(
+  number(),
+  check(
+    value => Number.isInteger(value) && value >= MIN_FRAME_CAPTURE_INTERVAL_MS && value <= MAX_FRAME_CAPTURE_INTERVAL_MS,
+    `expected an integer between ${MIN_FRAME_CAPTURE_INTERVAL_MS} and ${MAX_FRAME_CAPTURE_INTERVAL_MS}`,
+  ),
+)
 
 /**
- * One whitelisted app name as accepted over IPC: trimmed, non-empty, capped.
+ * One application-mode app name as accepted over IPC: trimmed, non-empty, capped.
  * Renderer payloads are untrusted input — TypeScript types do not survive
  * the IPC boundary, so every field is re-validated at runtime here.
  */
@@ -78,10 +107,13 @@ const appNameSchema = pipe(string(), trim(), minLength(1), maxLength(128))
 
 const settingsPatchSchema = object({
   enabled: optional(boolean()),
-  mode: optional(picklist(['whitelist'])),
+  mode: optional(picklist(['desktop', 'application'])),
   allowedApps: optional(pipe(array(appNameSchema), maxLength(64))),
+  captureBackend: optional(picklist(['native_frames', 'screenpipe'])),
+  frameCaptureIntervalMs: optional(frameCaptureIntervalSchema),
   dailySummaryEnabled: optional(boolean()),
   dailySummaryAtLocalTime: optional(pipe(string(), regex(LOCAL_TIME_PATTERN, 'expected HH:mm'))),
+  screenpipeDataDirectory: optional(pipe(string(), trim(), maxLength(1024))),
 })
 
 const pauseRequestSchema = object({
@@ -116,7 +148,7 @@ const taskSchema = object({
   }),
   observation: object({
     enabled: boolean(),
-    mode: picklist(['whitelist']),
+    mode: picklist(['desktop', 'application']),
     allowedApps: pipe(array(appNameSchema), maxLength(64)),
     pauseUntil: optional(isoTimestampSchema),
     privacyState: picklist(['observing', 'paused', 'not_observing_empty_whitelist', 'suppressed_fullscreen', 'suppressed_meeting', 'disabled']),
@@ -135,10 +167,14 @@ const upsertTaskRequestSchema = object({ task: taskSchema })
 
 const screenObservationConfigSchema = object({
   enabled: optional(boolean()),
+  mode: optional(picklist(['desktop', 'application'])),
   allowedApps: optional(array(string())),
+  captureBackend: optional(picklist(['native_frames', 'screenpipe'])),
+  frameCaptureIntervalMs: optional(number()),
   pauseUntil: optional(string()),
   dailySummaryEnabled: optional(boolean()),
   dailySummaryAtLocalTime: optional(string()),
+  screenpipeDataDirectory: optional(string()),
   pauseShortcutAccelerator: optional(string()),
   // Tasks registered with the desktop runtime; the decide loop runs against these.
   tasks: optional(record(string(), taskSchema)),
@@ -170,6 +206,43 @@ function parseIpcPayload<TSchema extends BaseSchema<unknown, unknown, BaseIssue<
   return result.output
 }
 
+function resolveDefaultScreenpipeDataDirectory(homeDirectory = homedir()) {
+  const rootCandidates = [join(homeDirectory, '.screenpipe'), join(homeDirectory, 'screenpipe')]
+  for (const root of rootCandidates) {
+    if (existsSync(root))
+      return root
+  }
+  return rootCandidates[0]!
+}
+
+/**
+ * Normalizes a screenpipe storage root path.
+ *
+ * Before:
+ * - "~/screenpipe-data"
+ * - "screenpipe-data"
+ *
+ * After:
+ * - "<home>/screenpipe-data"
+ * - "<absolute-cwd>/screenpipe-data"
+ */
+function normalizeScreenpipeDataDirectory(value?: string): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed)
+    return undefined
+  if (trimmed === '~')
+    return homedir()
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\'))
+    return join(homedir(), trimmed.slice(2))
+  return resolve(trimmed)
+}
+
+function normalizeFrameCaptureIntervalMs(value?: number): number {
+  if (!value || !Number.isFinite(value))
+    return DEFAULT_FRAME_CAPTURE_INTERVAL_MS
+  return Math.max(MIN_FRAME_CAPTURE_INTERVAL_MS, Math.min(MAX_FRAME_CAPTURE_INTERVAL_MS, Math.round(value)))
+}
+
 export interface ScreenObserverService {
   /**
    * Register a per-window eventa context, mirroring the global-shortcut
@@ -178,6 +251,10 @@ export interface ScreenObserverService {
    */
   registerWindow: (params: { context: EventaContext, window: BrowserWindow }) => void
   getState: () => ScreenObservationRuntimeState
+  /** Opens screenpipe's local data directory in the host OS file manager. */
+  openDataFolder: () => Promise<{ path: string }>
+  /** Lets the user choose a screenpipe storage root directory with the host OS picker. */
+  selectDataFolder: () => Promise<{ path?: string }>
   pause: (request: PauseObservationRequest) => ScreenObservationRuntimeState
   resume: () => ScreenObservationRuntimeState
   updateSettings: (patch: Partial<ScreenObservationSettings>) => ScreenObservationRuntimeState
@@ -215,6 +292,12 @@ export interface SetupScreenObserverOptions {
   noticeWindow: Pick<NoticeWindowManager, 'openTaskTouch'>
   /** Injected for tests; defaults to a localhost screenpipe client. */
   screenpipe?: ScreenpipeClient
+  /** Injected for tests; defaults to an Electron-owned screenpipe sidecar supervisor. */
+  screenpipeSupervisor?: ScreenpipeSupervisor
+  /** Injected for tests; defaults to an Electron hidden-window native frame capture controller. */
+  nativeCapture?: NativeScreenObservationCaptureController
+  /** Injected for tests; defaults to screenpipe's storage root under the current user home. */
+  screenpipeDataDirectory?: string
 }
 
 /**
@@ -225,8 +308,10 @@ export interface SetupScreenObserverOptions {
  *   exist per app.
  *
  * Expects:
- * - screenpipe may be absent; the runtime degrades to `screenpipeAvailable:
- *   false` and keeps re-checking on each poll tick.
+ * - Native frame capture is the default backend and runs through a hidden
+ *   Electron renderer so no screenpipe video chunks are produced.
+ * - screenpipe remains available as an explicit legacy backend and degrades
+ *   to `screenpipeAvailable: false` when startup is unavailable.
  *
  * Returns:
  * - A {@link ScreenObserverService} owning the poll loop, pause state, the
@@ -235,10 +320,9 @@ export interface SetupScreenObserverOptions {
  * Call stack:
  *
  * setupScreenObserver (main composition root)
- *   -> {@link createScreenpipeClient}
  *   -> poll tick
  *     -> resolveObservationPrivacyState (@proj-airi/server-sdk-shared) / {@link shouldCaptureScreen}
- *     -> {@link aggregateAppSummaries}
+ *     -> native frame capture or {@link aggregateAppSummaries}
  *     -> broadcast {@link electronScreenObservationSummaryCaptured}
  */
 export function setupScreenObserver(options: SetupScreenObserverOptions): ScreenObserverService {
@@ -255,17 +339,33 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   const openTaskDetailsListeners = new Set<(taskId: string) => void>()
 
   const suppression = { isFullscreen: false, isMeeting: false }
-  let screenpipeAvailable = false
+  let screenpipeAvailable: boolean | undefined
   let latestSummaryAt: string | undefined
   let lastCaptureEndedAt: Date | undefined
   let registeredAccelerator: string | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let ticking = false
+  let pendingTick = false
 
+  const defaultScreenpipeDataDirectory = options.screenpipeDataDirectory ?? resolveDefaultScreenpipeDataDirectory()
   const screenpipe = options.screenpipe ?? createScreenpipeClient()
+  const screenpipeSupervisor = options.screenpipeSupervisor ?? createScreenpipeSupervisor({
+    health: screenpipe.health,
+  })
+  const nativeCapture = options.nativeCapture ?? createNativeScreenObservationCapture()
+  let nativeCaptureStatus: NativeScreenObservationCaptureStatus | undefined
+  let nativeCaptureStartKey: string | undefined
+
+  const stopNativeFrameSubscription = nativeCapture.onFrame((frame) => {
+    handleNativeFrame(frame).catch(error => log.withError(error).warn('Failed to handle native screen observation frame'))
+  })
 
   function getConfig(): ScreenObservationConfig {
     return config.get() ?? {}
+  }
+
+  function screenpipeDataDirectoryFromConfig(stored = getConfig()) {
+    return normalizeScreenpipeDataDirectory(stored.screenpipeDataDirectory) ?? defaultScreenpipeDataDirectory
   }
 
   function settingsFromConfig(stored: ScreenObservationConfig): ScreenObservationSettings {
@@ -273,18 +373,26 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       // Privacy first: the master switch defaults to OFF until the user
       // explicitly enables observation in settings (frozen product decision).
       enabled: stored.enabled ?? false,
-      mode: 'whitelist',
+      mode: stored.mode ?? 'desktop',
       allowedApps: stored.allowedApps ?? [],
+      captureBackend: stored.captureBackend ?? 'native_frames',
+      frameCaptureIntervalMs: normalizeFrameCaptureIntervalMs(stored.frameCaptureIntervalMs),
       dailySummaryEnabled: stored.dailySummaryEnabled ?? true,
       dailySummaryAtLocalTime: stored.dailySummaryAtLocalTime ?? DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
+      screenpipeDataDirectory: screenpipeDataDirectoryFromConfig(stored),
     }
   }
+
+  const initialConfig = getConfig()
+  if (initialConfig.captureBackend === 'screenpipe')
+    config.update({ ...initialConfig, captureBackend: 'native_frames' })
 
   function resolveState(now = new Date()): ScreenObservationRuntimeState {
     const stored = getConfig()
     const settings = settingsFromConfig(stored)
     const privacyState = resolveObservationPrivacyState({
       enabled: settings.enabled,
+      mode: settings.mode,
       allowedApps: settings.allowedApps,
       pauseUntil: stored.pauseUntil,
       now,
@@ -298,6 +406,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       pauseUntil: privacyState === 'paused' ? stored.pauseUntil : undefined,
       suppression: { ...suppression },
       screenpipeAvailable,
+      nativeCaptureStatus,
       latestSummaryAt,
       tasks: Object.values(stored.tasks ?? {}),
     }
@@ -339,30 +448,150 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     config.update({ ...getConfig(), ...patch })
   }
 
+  function hasCaptureIntent(stored: ScreenObservationConfig, settings: ScreenObservationSettings, now: Date) {
+    if (!settings.enabled)
+      return false
+    if (settings.mode === 'application' && settings.allowedApps.length === 0)
+      return false
+
+    if (!stored.pauseUntil)
+      return true
+
+    const pauseUntilMs = new Date(stored.pauseUntil).getTime()
+    return !Number.isFinite(pauseUntilMs) || pauseUntilMs <= now.getTime()
+  }
+
+  function requestTick() {
+    if (ticking) {
+      pendingTick = true
+      return
+    }
+
+    void tick()
+  }
+
+  function nativeCaptureKey(settings: ScreenObservationSettings) {
+    return JSON.stringify([
+      settings.mode,
+      settings.allowedApps,
+      settings.frameCaptureIntervalMs,
+      NATIVE_CAPTURE_MAX_WIDTH,
+      NATIVE_CAPTURE_MAX_HEIGHT,
+      NATIVE_CAPTURE_JPEG_QUALITY,
+    ])
+  }
+
+  async function ensureNativeCaptureRunning(settings: ScreenObservationSettings) {
+    const nextKey = nativeCaptureKey(settings)
+    if (nativeCaptureStartKey === nextKey && nativeCaptureStatus?.running)
+      return
+
+    nativeCaptureStatus = await nativeCapture.start({
+      mode: settings.mode,
+      allowedApps: settings.allowedApps,
+      intervalMs: settings.frameCaptureIntervalMs,
+      workloadId: 'screen:interpret',
+      publishContext: true,
+      maxWidth: NATIVE_CAPTURE_MAX_WIDTH,
+      maxHeight: NATIVE_CAPTURE_MAX_HEIGHT,
+      quality: NATIVE_CAPTURE_JPEG_QUALITY,
+    })
+    nativeCaptureStartKey = nextKey
+  }
+
+  async function stopNativeCapture() {
+    nativeCaptureStartKey = undefined
+    nativeCaptureStatus = await nativeCapture.stop()
+  }
+
   const pause: ScreenObserverService['pause'] = (request) => {
     const pauseUntil = computePauseUntil(request, new Date())
     persist({ pauseUntil: pauseUntil.toISOString() })
     log.log(`Screen observation paused until ${pauseUntil.toISOString()} (${request.reason})`)
-    return publishStateIfChanged()
+    const state = publishStateIfChanged()
+    requestTick()
+    return state
   }
 
   const resume: ScreenObserverService['resume'] = () => {
     persist({ pauseUntil: undefined })
     log.log('Screen observation resumed')
-    return publishStateIfChanged()
+    screenpipeAvailable = undefined
+    const state = publishStateIfChanged()
+    requestTick()
+    return state
   }
 
   const updateSettings: ScreenObserverService['updateSettings'] = (patch) => {
     // Undefined patch fields must not erase stored values, so merge per-field
     // instead of spreading the whole patch.
     const stored = getConfig()
+    const now = new Date()
+    const previousSettings = settingsFromConfig(stored)
+    const previousHadCaptureIntent = hasCaptureIntent(stored, previousSettings, now)
+    const previousDataDirectory = screenpipeDataDirectoryFromConfig(stored)
     persist({
       enabled: patch.enabled ?? stored.enabled,
+      mode: patch.mode ?? stored.mode,
       allowedApps: patch.allowedApps ? dedupeAppNames(patch.allowedApps) : stored.allowedApps,
+      captureBackend: patch.captureBackend ?? stored.captureBackend,
+      frameCaptureIntervalMs: patch.frameCaptureIntervalMs !== undefined
+        ? normalizeFrameCaptureIntervalMs(patch.frameCaptureIntervalMs)
+        : stored.frameCaptureIntervalMs,
       dailySummaryEnabled: patch.dailySummaryEnabled ?? stored.dailySummaryEnabled,
       dailySummaryAtLocalTime: patch.dailySummaryAtLocalTime ?? stored.dailySummaryAtLocalTime,
+      screenpipeDataDirectory: patch.screenpipeDataDirectory !== undefined
+        ? normalizeScreenpipeDataDirectory(patch.screenpipeDataDirectory)
+        : stored.screenpipeDataDirectory,
     })
-    return publishStateIfChanged()
+    const nextStored = getConfig()
+    const nextSettings = settingsFromConfig(nextStored)
+    const nextHasCaptureIntent = hasCaptureIntent(nextStored, nextSettings, now)
+    if (!nextHasCaptureIntent || !previousHadCaptureIntent)
+      screenpipeAvailable = undefined
+    if (screenpipeDataDirectoryFromConfig(nextStored) !== previousDataDirectory) {
+      screenpipeAvailable = undefined
+      lastCaptureEndedAt = undefined
+    }
+    if (
+      previousSettings.captureBackend !== nextSettings.captureBackend
+      || previousSettings.frameCaptureIntervalMs !== nextSettings.frameCaptureIntervalMs
+      || previousSettings.mode !== nextSettings.mode
+      || JSON.stringify(previousSettings.allowedApps) !== JSON.stringify(nextSettings.allowedApps)
+    ) {
+      nativeCaptureStartKey = undefined
+      nativeCaptureStatus = undefined
+    }
+
+    const state = publishStateIfChanged()
+    requestTick()
+    return state
+  }
+
+  const openDataFolder: ScreenObserverService['openDataFolder'] = async () => {
+    const screenpipeDataDirectory = screenpipeDataDirectoryFromConfig()
+    // Ensure the destination exists before delegating to Electron shell; on a
+    // fresh profile screenpipe may not have created its storage directory yet.
+    mkdirSync(screenpipeDataDirectory, { recursive: true })
+    const errorMessage = await shell.openPath(screenpipeDataDirectory)
+    if (errorMessage)
+      throw new Error(`Failed to open screenpipe data folder: ${errorMessage}`)
+    return { path: screenpipeDataDirectory }
+  }
+
+  const selectDataFolder: ScreenObserverService['selectDataFolder'] = async () => {
+    const result = await dialog.showOpenDialog({
+      defaultPath: screenpipeDataDirectoryFromConfig(),
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled)
+      return {}
+
+    const selectedPath = result.filePaths[0]
+    if (!selectedPath)
+      return {}
+
+    return { path: normalizeScreenpipeDataDirectory(selectedPath) ?? selectedPath }
   }
 
   const upsertTask: ScreenObserverService['upsertTask'] = (task) => {
@@ -370,18 +599,81 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     return publishStateIfChanged()
   }
 
+  function createNativeFrameSummary(frame: NativeScreenObservationFrameResult, settings: ScreenObservationSettings, privacyState: ScreenObservationRuntimeState['privacyState']): ScreenObserverSummary {
+    const capturedAt = new Date(frame.capturedAt)
+    const windowStartedAt = new Date(capturedAt.getTime() - settings.frameCaptureIntervalMs)
+    const text = frame.text?.trim()
+    const fallbackSummary = frame.error
+      ? `captured ${frame.sourceName}; interpretation unavailable: ${frame.error}`
+      : `captured ${frame.sourceName}`
+    const appSummary = text || fallbackSummary
+
+    const summary: ScreenObserverSummary = {
+      id: randomUUID(),
+      capturedAt: capturedAt.toISOString(),
+      windowStartedAt: windowStartedAt.toISOString(),
+      windowEndedAt: capturedAt.toISOString(),
+      source: 'native_frames',
+      privacyState,
+      apps: [{
+        appId: frame.sourceId,
+        appName: frame.sourceName,
+        windowTitle: frame.displayId,
+        observedSeconds: settings.frameCaptureIntervalMs / 1000,
+        summary: appSummary,
+        matchedWhitelist: settings.mode === 'desktop'
+          || settings.allowedApps.some(appName => frame.sourceName.toLowerCase().includes(appName.toLowerCase())),
+      }],
+      taskSignals: [],
+      summary: `observed ${frame.sourceName}: ${appSummary}`,
+      confidence: frame.confidence,
+      rawReference: `native-frame:${frame.sourceId}:${frame.id}`,
+    }
+
+    return {
+      ...summary,
+      contexts: createScreenObservationContextsFromSummary(summary),
+    }
+  }
+
+  async function handleNativeFrame(frame: NativeScreenObservationFrameResult) {
+    const now = new Date(frame.capturedAt)
+    const state = resolveState(now)
+    if (!shouldCaptureScreen(state.privacyState))
+      return
+
+    nativeCaptureStatus = {
+      ...(nativeCaptureStatus ?? { running: true, sourceCount: 0 }),
+      running: true,
+      lastFrameAt: frame.capturedAt,
+      lastInterpretationAt: frame.text ? frame.capturedAt : nativeCaptureStatus?.lastInterpretationAt,
+      lastError: frame.error,
+    }
+
+    const summary = createNativeFrameSummary(frame, state.settings, state.privacyState)
+    latestSummaryAt = summary.capturedAt
+    broadcast(context => context.emit(electronScreenObservationSummaryCaptured, { summary }))
+    publishStateIfChanged()
+    decideProgressTouches(summary, now)
+  }
+
   async function captureWindowSummary(now: Date): Promise<ScreenObserverSummary | undefined> {
     const { settings, privacyState } = lastBroadcastState
     const windowStart = lastCaptureEndedAt ?? new Date(now.getTime() - POLL_INTERVAL_MS)
 
-    // One query per whitelisted app: non-whitelisted apps' OCR text is never
-    // pulled into this process, which keeps the whitelist a hard boundary
-    // instead of a post-hoc filter.
-    const results = await Promise.all(settings.allowedApps.map(appName => screenpipe.searchOcr({
-      appName,
+    const searchWindow = {
       startTime: windowStart.toISOString(),
       endTime: now.toISOString(),
-    })))
+    }
+    const results = settings.mode === 'application'
+      // Application mode is the narrow focus mode: one query per selected app.
+      ? await Promise.all(settings.allowedApps.map(appName => screenpipe.searchOcr({
+          ...searchWindow,
+          appName,
+        })))
+      // Desktop mode reads the whole local screenpipe OCR stream across the
+      // connected desktop capture sources.
+      : [await screenpipe.searchOcr(searchWindow)]
 
     // The waterline advances even when a window came back partial (page cap
     // hit during a long catch-up): the summary is marked partial below
@@ -389,13 +681,16 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     lastCaptureEndedAt = now
     const partial = results.some(result => !result.complete)
 
-    const apps = aggregateAppSummaries(results.flatMap(result => result.items), settings.allowedApps)
+    const apps = aggregateAppSummaries(
+      results.flatMap(result => result.items),
+      settings.mode === 'application' ? settings.allowedApps : undefined,
+    )
     if (apps.length === 0)
       return undefined
 
     const overview = apps.map(app => `${app.appName} (${app.observedSeconds}s)`).join(', ')
 
-    return {
+    const summary: ScreenObserverSummary = {
       id: randomUUID(),
       capturedAt: now.toISOString(),
       windowStartedAt: windowStart.toISOString(),
@@ -409,6 +704,11 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       summary: `observed ${apps.length} app(s): ${overview}${partial ? ' (partial window)' : ''}`,
       // Digest quality proxy: share of observed apps that yielded any text.
       confidence: apps.filter(app => app.summary.length > 0).length / apps.length,
+    }
+
+    return {
+      ...summary,
+      contexts: createScreenObservationContextsFromSummary(summary),
     }
   }
 
@@ -425,10 +725,38 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       if (stored.pauseUntil && new Date(stored.pauseUntil).getTime() <= now.getTime())
         persist({ pauseUntil: undefined })
 
-      screenpipeAvailable = await screenpipe.health()
-
       const settings = settingsFromConfig(getConfig())
-      if (screenpipeAvailable && settings.enabled && settings.allowedApps.length > 0) {
+      const captureIntent = hasCaptureIntent(getConfig(), settings, now)
+
+      if (!captureIntent) {
+        await screenpipeSupervisor.stop()
+        await stopNativeCapture()
+        screenpipeAvailable = undefined
+        suppression.isMeeting = false
+      }
+      else if (settings.captureBackend === 'screenpipe') {
+        await stopNativeCapture()
+        await screenpipeSupervisor.ensureRunning({ dataDirectory: settings.screenpipeDataDirectory })
+        screenpipeAvailable = await screenpipe.health()
+      }
+      else {
+        await screenpipeSupervisor.stop()
+        screenpipeAvailable = undefined
+        lastCaptureEndedAt = undefined
+        try {
+          await ensureNativeCaptureRunning(settings)
+        }
+        catch (error) {
+          nativeCaptureStatus = {
+            running: false,
+            sourceCount: 0,
+            lastError: errorMessageFrom(error) ?? 'Failed to start native screen observation capture',
+          }
+        }
+        suppression.isMeeting = false
+      }
+
+      if (screenpipeAvailable && settings.enabled) {
         // Metadata-only probe: app name / window title, never OCR text —
         // suppression detection must not breach the whitelist capture boundary.
         const focused = await screenpipe.focusedWindow()
@@ -440,7 +768,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
 
       const state = publishStateIfChanged()
 
-      if (screenpipeAvailable && shouldCaptureScreen(state.privacyState)) {
+      if (settings.captureBackend === 'screenpipe' && screenpipeAvailable && shouldCaptureScreen(state.privacyState)) {
         const summary = await captureWindowSummary(now)
         if (summary) {
           latestSummaryAt = summary.capturedAt
@@ -455,6 +783,10 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     }
     finally {
       ticking = false
+      if (pendingTick) {
+        pendingTick = false
+        requestTick()
+      }
     }
   }
 
@@ -472,7 +804,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
           resume()
         else if (state.privacyState === 'observing')
           pause({ reason: 'manual_1h' })
-        // Disabled / empty whitelist / suppressed: nothing sensible to toggle.
+        // Disabled / application mode without apps / suppressed: nothing sensible to toggle.
       })
       if (ok)
         registeredAccelerator = accelerator
@@ -516,7 +848,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   /**
-   * Normalizes a renderer-supplied app whitelist.
+   * Normalizes a renderer-supplied application observation list.
    *
    * Before:
    * - [' Code ', 'code', 'Slack']
@@ -656,6 +988,8 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     })
 
     defineInvokeHandler(context, electronScreenObservationGetState, () => resolveState())
+    defineInvokeHandler(context, electronScreenObservationOpenDataFolder, () => openDataFolder())
+    defineInvokeHandler(context, electronScreenObservationSelectDataFolder, () => selectDataFolder())
     defineInvokeHandler(context, electronScreenObservationUpdateSettings, patch => updateSettings(parseIpcPayload(settingsPatchSchema, patch ?? {}, 'screen observation settings')))
     defineInvokeHandler(context, electronScreenObservationPause, request => pause(parseIpcPayload(pauseRequestSchema, request, 'screen observation pause')))
     defineInvokeHandler(context, electronScreenObservationResume, () => resume())
@@ -679,17 +1013,22 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     contexts.clear()
     stateListeners.clear()
     openTaskDetailsListeners.clear()
+    stopNativeFrameSubscription()
+    nativeCapture.dispose()
+    void screenpipeSupervisor.stop().catch(error => log.withError(error).warn('Failed to stop screenpipe sidecar'))
   }
 
   registerPauseShortcut()
-  pollTimer = setInterval(() => void tick(), POLL_INTERVAL_MS)
-  void tick()
+  pollTimer = setInterval(requestTick, POLL_INTERVAL_MS)
+  requestTick()
 
   onAppBeforeQuit(() => dispose())
 
   return {
     registerWindow,
     getState: () => resolveState(),
+    openDataFolder,
+    selectDataFolder,
     pause,
     resume,
     updateSettings,

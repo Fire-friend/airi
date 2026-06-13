@@ -103,6 +103,14 @@ export default {
       to: 'godot-stage',
       filter: ['**/*'],
     },
+    {
+      // AIRI-owned screen observation sidecar. The runtime resolves this as
+      // `process.resourcesPath/screenpipe/<screenpipe binary>` and starts it
+      // only when observation has active capture intent.
+      from: 'build/screenpipe/${os}',
+      to: 'screenpipe',
+      filter: ['**/*', '!README.md', '!**/.gitkeep'],
+    },
   ],
   extraMetadata: {
     name: 'ai.moeru.airi',

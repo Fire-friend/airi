@@ -29,7 +29,8 @@ chat:
       unscheduled: 未设定时间
     observation:
       disabled: 不会观察——屏幕观察功能未开启。
-      empty-whitelist: 暂时不会观察——白名单为空，不会看任何应用。
+      desktop: 接入的桌面屏幕。
+      empty-whitelist: 暂时不会观察——应用模式未选择任何应用。
       apps: '{apps}'
     touch-level:
       l0: 静默——进度只写进任务卡
