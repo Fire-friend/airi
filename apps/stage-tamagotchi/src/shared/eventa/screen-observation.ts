@@ -10,6 +10,28 @@ import type {
 import { defineEventa, defineInvokeEventa } from '@moeru/eventa'
 
 /**
+ * Near-realtime snapshot of what is on screen right now.
+ *
+ * Emitted every ~15 s (the current-state poll cadence) from raw MineContext
+ * screenshot contexts — no VLM synthesis, just OS-level app/window metadata.
+ * Consumers that need synthesized activity understanding should listen to
+ * `electronScreenObservationSummaryCaptured` instead.
+ *
+ * Requires: MineContext's capture module must be started with screenshot
+ * capture enabled (`capture_interval: 5` in MineContext config). When capture
+ * is disabled (the default), raw_context results are empty and this event is
+ * not emitted.
+ */
+export interface ScreenObserverCurrentState {
+  capturedAt: string
+  privacyState: ScreenObserverPrivacyState
+  focusedApp?: {
+    appName: string
+    windowTitle?: string
+  }
+}
+
+/**
  * Live state of the Electron-main screen observation runtime.
  *
  * This is the desktop runtime's view (collection triggers, OS signals,
@@ -30,8 +52,10 @@ export interface ScreenObservationRuntimeState {
   }
   /** Whether the local observation source (MineContext) responded to the last health check. */
   observationSourceAvailable: boolean
-  /** ISO timestamp of the most recent captured summary, if any. */
+  /** ISO timestamp of the most recent captured long-memory summary, if any. */
   latestSummaryAt?: string
+  /** ISO timestamp of the most recent near-realtime current-state snapshot, if any. */
+  latestCurrentStateAt?: string
   /** Tasks registered with the desktop runtime; the main-process decide loop runs against these. */
   tasks: Task[]
 }
@@ -50,6 +74,12 @@ export const electronScreenObservationUpsertTask = defineInvokeEventa<ScreenObse
 
 export const electronScreenObservationStateChanged = defineEventa<ScreenObservationRuntimeState>('eventa:event:electron:screen-observation:state-changed')
 export const electronScreenObservationSummaryCaptured = defineEventa<{ summary: ScreenObserverSummary }>('eventa:event:electron:screen-observation:summary-captured')
+/**
+ * Near-realtime current-state snapshot (raw_context track, ~15 s cadence).
+ * Independent output from `electronScreenObservationSummaryCaptured` (long-memory
+ * activity_context track, 30 s cadence). Do not mix these two tracks.
+ */
+export const electronScreenObservationCurrentStateCaptured = defineEventa<ScreenObserverCurrentState>('eventa:event:electron:screen-observation:current-state-captured')
 /** Broadcast for every touch the runtime delivers; renderers drive L1 role gestures and L2 notice content from this. */
 export const electronScreenObservationTouchDelivered = defineEventa<TouchEventPayload>('eventa:event:electron:screen-observation:touch-delivered')
 /** Emitted when the user clicks an L3 system notification; renderers navigate to the task details view. */

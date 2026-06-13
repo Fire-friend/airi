@@ -26,9 +26,10 @@ import {
   TOUCH_THROTTLE_WINDOW_MS,
 } from '@proj-airi/server-sdk-shared'
 import { globalShortcut, Notification } from 'electron'
-import { array, boolean, check, maxLength, minLength, number, object, optional, picklist, pipe, record, regex, safeParse, string, summarize, trim } from 'valibot'
+import { array, boolean, check, maxLength, minLength, minValue, number, object, optional, picklist, pipe, record, regex, safeParse, string, summarize, trim } from 'valibot'
 
 import {
+  electronScreenObservationCurrentStateCaptured,
   electronScreenObservationGetState,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationPause,
@@ -39,6 +40,7 @@ import {
   electronScreenObservationUpdateSettings,
   electronScreenObservationUpsertTask,
 } from '../../../../shared/eventa/screen-observation'
+import type { ScreenObserverCurrentState } from '../../../../shared/eventa/screen-observation'
 import { onAppBeforeQuit } from '../../../libs/bootkit/lifecycle'
 import { createConfig } from '../../../libs/electron/persistence'
 import {
@@ -55,11 +57,22 @@ import { aggregateContextActivities, createMineContextClient } from './mineconte
 type EventaContext = ReturnType<typeof createContext>['context']
 
 /**
- * How often the observer re-evaluates suppression signals and polls MineContext
- * for new activity contexts. 30s keeps the runtime responsive to MineContext
- * updates even though MineContext generates activities on a 10-minute cadence.
+ * Default long-memory poll: how often the observer queries MineContext for
+ * new activity_context entries (VLM-synthesized, 10-minute cadence minimum).
+ * 30 s keeps the loop responsive without hammering the API.
  */
-const POLL_INTERVAL_MS = 30 * 1000
+const DEFAULT_LONG_MEMORY_POLL_MS = 30_000
+
+/**
+ * Default current-state poll: how often the observer queries MineContext for
+ * new raw_context entries (individual screenshots, ~5 s capture cadence when
+ * MineContext capture is enabled). 15 s gives near-realtime app/window updates.
+ *
+ * Requires MineContext to be started with screenshot capture enabled:
+ *   capture_interval: 5  # in MineContext config/config.yaml
+ * Without this, raw_context results are empty and no current-state events fire.
+ */
+const DEFAULT_CURRENT_STATE_POLL_MS = 15_000
 
 /** Default accelerator for the global "pause observation" shortcut; users can override or clear it in settings. */
 const DEFAULT_PAUSE_SHORTCUT = 'CommandOrControl+Alt+P'
@@ -140,6 +153,17 @@ const screenObservationConfigSchema = object({
   dailySummaryEnabled: optional(boolean()),
   dailySummaryAtLocalTime: optional(string()),
   pauseShortcutAccelerator: optional(string()),
+  /**
+   * Long-memory poll interval in ms (activity_context track).
+   * Must be ≥ 10 000. Defaults to 30 000 (30 s).
+   */
+  longMemoryPollIntervalMs: optional(pipe(number(), minValue(10_000))),
+  /**
+   * Near-realtime current-state poll interval in ms (raw_context track).
+   * Must be ≥ 5 000. Defaults to 15 000 (15 s).
+   * Meaningful only when MineContext screenshot capture is enabled.
+   */
+  currentStatePollIntervalMs: optional(pipe(number(), minValue(5_000))),
   // Tasks registered with the desktop runtime; the decide loop runs against these.
   tasks: optional(record(string(), taskSchema)),
   // Set once the very first progress touch was ever delivered; drives the
@@ -257,10 +281,14 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   const suppression = { isFullscreen: false, isMeeting: false }
   let observationSourceAvailable = false
   let latestSummaryAt: string | undefined
+  let latestCurrentStateAt: string | undefined
   let lastCaptureEndedAt: Date | undefined
+  let lastCurrentStateEndedAt: Date | undefined
   let registeredAccelerator: string | undefined
-  let pollTimer: ReturnType<typeof setInterval> | undefined
+  let longMemoryPollTimer: ReturnType<typeof setInterval> | undefined
+  let currentStatePollTimer: ReturnType<typeof setInterval> | undefined
   let ticking = false
+  let currentStateTicking = false
 
   const minecontext = options.minecontext ?? createMineContextClient()
 
@@ -299,6 +327,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       suppression: { ...suppression },
       observationSourceAvailable,
       latestSummaryAt,
+      latestCurrentStateAt,
       tasks: Object.values(stored.tasks ?? {}),
     }
   }
@@ -372,7 +401,8 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
 
   async function captureWindowSummary(now: Date): Promise<ScreenObserverSummary | undefined> {
     const { settings, privacyState } = lastBroadcastState
-    const windowStart = lastCaptureEndedAt ?? new Date(now.getTime() - POLL_INTERVAL_MS)
+    const longMemoryPollMs = getConfig().longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
+    const windowStart = lastCaptureEndedAt ?? new Date(now.getTime() - longMemoryPollMs)
 
     const activities = await minecontext.getActivities({ since: windowStart })
 
@@ -445,6 +475,75 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     }
     finally {
       ticking = false
+    }
+  }
+
+  /**
+   * Near-realtime track: queries MineContext raw_context (individual screenshot
+   * captures) and emits `electronScreenObservationCurrentStateCaptured`.
+   *
+   * This is independent from the long-memory tick — do not mix results from
+   * these two tracks. Current state carries no VLM semantics; it only surfaces
+   * which app/window is focused right now based on raw OS screenshot metadata.
+   *
+   * Silently skips when:
+   * - MineContext is unreachable (observationSourceAvailable = false)
+   * - Observation is disabled or suppressed
+   * - raw_context results are empty (MineContext capture module not enabled)
+   */
+  async function currentStateTick() {
+    if (currentStateTicking)
+      return
+    currentStateTicking = true
+    try {
+      // Fast track guards: skip if MineContext is down or observation is off.
+      if (!observationSourceAvailable)
+        return
+      const settings = settingsFromConfig(getConfig())
+      if (!settings.enabled)
+        return
+      if (!shouldCaptureScreen(lastBroadcastState.privacyState))
+        return
+
+      const now = new Date()
+      const currentStatePollMs = getConfig().currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS
+      const windowStart = lastCurrentStateEndedAt ?? new Date(now.getTime() - currentStatePollMs)
+
+      const rawContexts = await minecontext.getActivities({
+        since: windowStart,
+        limit: 20,
+        contextType: 'raw_context',
+      })
+      lastCurrentStateEndedAt = now
+
+      if (rawContexts.length === 0)
+        return
+
+      // Pick the most recently captured screenshot context.
+      const sorted = [...rawContexts].sort((a, b) => {
+        const normalize = (t: string) => t.includes('T') ? t : t.replace(' ', 'T')
+        return new Date(normalize(b.create_time)).getTime() - new Date(normalize(a.create_time)).getTime()
+      })
+      const latest = sorted[0]!
+      const screenshotRc = latest.raw_contexts?.find(rc => rc.source === 'screenshot')
+      const rawApp = screenshotRc?.additional_info?.app
+      const rawWindow = screenshotRc?.additional_info?.window
+
+      const currentState: ScreenObserverCurrentState = {
+        capturedAt: now.toISOString(),
+        privacyState: lastBroadcastState.privacyState,
+        focusedApp: rawApp ? { appName: rawApp as string, windowTitle: rawWindow as string | undefined } : undefined,
+      }
+
+      latestCurrentStateAt = currentState.capturedAt
+      broadcast(context => context.emit(electronScreenObservationCurrentStateCaptured, currentState))
+      publishStateIfChanged()
+    }
+    catch (error) {
+      log.withError(error).warn('current state tick failed')
+    }
+    finally {
+      currentStateTicking = false
     }
   }
 
@@ -653,9 +752,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   const dispose: ScreenObserverService['dispose'] = () => {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = undefined
+    if (longMemoryPollTimer) {
+      clearInterval(longMemoryPollTimer)
+      longMemoryPollTimer = undefined
+    }
+    if (currentStatePollTimer) {
+      clearInterval(currentStatePollTimer)
+      currentStatePollTimer = undefined
     }
     if (registeredAccelerator) {
       try {
@@ -672,7 +775,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   registerPauseShortcut()
-  pollTimer = setInterval(() => void tick(), POLL_INTERVAL_MS)
+
+  const stored = getConfig()
+  const longMemoryMs = stored.longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
+  const currentStateMs = stored.currentStatePollIntervalMs ?? DEFAULT_CURRENT_STATE_POLL_MS
+
+  longMemoryPollTimer = setInterval(() => void tick(), longMemoryMs)
+  currentStatePollTimer = setInterval(() => void currentStateTick(), currentStateMs)
   void tick()
 
   onAppBeforeQuit(() => dispose())

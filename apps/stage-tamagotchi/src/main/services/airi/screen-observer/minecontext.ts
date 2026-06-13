@@ -70,6 +70,14 @@ interface SearchResultEntry {
     properties?: {
       create_time?: string
       event_time?: string
+      /** Present on raw_context results: how the context was captured. */
+      source?: string
+      /** Present on raw_context results: additional OS-level metadata. */
+      additional_info?: {
+        app?: string
+        window?: string
+        [key: string]: unknown
+      }
     }
     raw_contexts?: MineContextRawContext[]
   }
@@ -94,15 +102,26 @@ interface HealthResponse {
   }
 }
 
+export type MineContextQueryType = 'activity_context' | 'raw_context'
+
 export interface MineContextClient {
   /** True when the local MineContext service answers its health endpoint. */
   health: () => Promise<boolean>
   /**
-   * Returns activity contexts created on or after `since`.
-   * Uses vector search scoped to `activity_context` type; filters client-side
-   * by create_time because the API does not expose a time-range query param.
+   * Returns contexts created on or after `since`.
+   *
+   * `contextType` selects the MineContext data layer:
+   * - `'activity_context'` (default) — VLM-synthesized summaries; minimum
+   *   generation cadence is 10 minutes. Use for the long-memory track.
+   * - `'raw_context'` — individual screenshot captures; available as fast as
+   *   the MineContext `capture_interval` (5 s when enabled). Use for the
+   *   near-realtime current-state track. Requires MineContext's screenshot
+   *   capture to be explicitly enabled in its config.
+   *
+   * Filters client-side by create_time because the API does not expose a
+   * time-range query param.
    */
-  getActivities: (params: { since: Date, limit?: number }) => Promise<MineContextActivityContext[]>
+  getActivities: (params: { since: Date, limit?: number, contextType?: MineContextQueryType }) => Promise<MineContextActivityContext[]>
   /**
    * App name and window title inferred from the most recent activity context's
    * raw screenshot data. Returns undefined when no recent activity is found.
@@ -148,6 +167,39 @@ function toActivityContext(entry: SearchResultEntry): MineContextActivityContext
 }
 
 /**
+ * Maps a raw_context search result into the MineContextActivityContext shape.
+ *
+ * Raw contexts have no VLM synthesis (no title/summary/keywords). App and
+ * window metadata live in context.properties.additional_info (OS-captured at
+ * screenshot time). We synthetically wrap them as a single raw_context entry
+ * so that `aggregateContextActivities` — which reads raw_contexts[].additional_info —
+ * can extract app/window without knowing the query type.
+ */
+function toRawContextEntry(entry: SearchResultEntry): MineContextActivityContext {
+  const { context } = entry
+  const additionalInfo = context.properties?.additional_info
+  return {
+    id: context.id,
+    title: undefined,
+    summary: undefined,
+    keywords: [],
+    entities: [],
+    context_type: 'raw_context',
+    confidence: 0,
+    importance: 0,
+    create_time: context.properties?.create_time ?? '',
+    event_time: context.properties?.event_time ?? context.properties?.create_time ?? '',
+    raw_contexts: [{
+      object_id: context.id,
+      content_format: 'image',
+      source: 'screenshot',
+      create_time: context.properties?.create_time ?? '',
+      additional_info: additionalInfo,
+    }],
+  }
+}
+
+/**
  * Creates a MineContext REST client bound to one base URL.
  *
  * Use when:
@@ -182,14 +234,14 @@ export function createMineContextClient(options?: MineContextClientOptions): Min
     }
   }
 
-  async function searchActivityContexts(limit: number): Promise<SearchResultEntry[]> {
+  async function searchContexts(limit: number, contextType: MineContextQueryType): Promise<SearchResultEntry[]> {
     const payload = await request('/api/vector_search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query: 'screen activity application',
         top_k: limit,
-        context_types: ['activity_context'],
+        context_types: [contextType],
       }),
     }) as VectorSearchResponse | undefined
 
@@ -202,15 +254,16 @@ export function createMineContextClient(options?: MineContextClientOptions): Min
       return payload?.data?.status === 'healthy'
     },
 
-    getActivities: async ({ since, limit = 50 }) => {
-      const results = await searchActivityContexts(limit)
+    getActivities: async ({ since, limit = 50, contextType = 'activity_context' }) => {
+      const results = await searchContexts(limit, contextType)
+      const mapper = contextType === 'raw_context' ? toRawContextEntry : toActivityContext
       return results
-        .map(toActivityContext)
+        .map(mapper)
         .filter(ctx => parseContextTime(ctx.create_time).getTime() >= since.getTime())
     },
 
     getFocusedApp: async () => {
-      const results = await searchActivityContexts(5)
+      const results = await searchContexts(5, 'activity_context')
       if (results.length === 0)
         return undefined
 
