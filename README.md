@@ -256,7 +256,7 @@ This shows the end-to-end pipeline added to give AIRI passive awareness of your 
 
 ```mermaid
 flowchart TD
-    MC["MineContext daemon\n(opencontext, localhost:1733)\nscreenshot capture every ~5s\nVLM activity summary every ~10min"]
+    MC["MineContext ⟨ integrated external service, :1733 ⟩\nscreenshot capture ~5s · VLM activity summary ~10min"]
 
     subgraph MAIN["Electron main process (stage-tamagotchi)"]
         SO["ScreenObserverService\nTwo polling timers"]
@@ -271,9 +271,10 @@ flowchart TD
         DL["Privacy Layer 2 — renderer denylist\n(sensitive-app patterns:\n1Password, Incognito, etc.)"]
         CU["applyCurrentState()\n→ contextId: screen-observation:current-state\nephemeral / ReplaceSelf"]
         LMI["ingestLongMemorySummary()\nbuild LongMemoryCandidate\n(fnv1a hash dedup)"]
-        FH["updateHabitFacets()\nevidence + days + decay gate"]
+        FH["updateHabitFacets()\nOpenHuman-inspired memory model\n⟨ native TS impl · not a package dep ⟩\nevidence + days + decay gate"]
         SF["stable facet promoted\n→ contextId: screen-observation:long-memory-candidates"]
         PF["provisional facet\n(accumulating, not yet in context)"]
+        TJ["TokenJuice context compression\n⟨ planned · not yet implemented ⟩\ncurrent: template-string concatenation"]
         ONT["Ontology / consciousness.ts\n(agent awareness container)"]
         CH["sendContextUpdate()\nWS context:update → ws://localhost:6121"]
     end
@@ -304,13 +305,17 @@ flowchart TD
     FH -->|evidenceCount≥3, distinctDays≥2, decayedEvidence≥2.5| SF
     FH -->|below threshold| PF
     CU --> ONT
-    SF --> ONT
+    SF -->|currently direct inject| ONT
+    SF -.->|planned route| TJ
+    TJ -.->|compressed context| ONT
     ONT --> CH
     CH --> SR
     SR --> CB
     CB --> CR
     CR --> ORCH
     ORCH --> PROV
+
+    style TJ stroke-dasharray: 5 5,fill:#f9f9f9
 ```
 
 **Privacy**: observation passes through two independent filter layers. Layer 1 (main process): only apps on the `allowedApps` whitelist pass through the IPC bridge; fullscreen and meeting surfaces are suppressed automatically. Layer 2 (renderer): a denylist of sensitive-app name patterns (password managers, private-browsing windows, etc.) strips any content that slipped through before it reaches the ontology. Manual pause (Ctrl/Cmd+Alt+P) halts both tracks for 15 min, 1 h, or the rest of the day.
