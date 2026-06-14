@@ -3,13 +3,18 @@ import { describe, expect, it } from 'vitest'
 import {
   createScreenObservationTask,
   DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
+  DEFAULT_TASK_COMPANION_THRESHOLDS,
   decideDailySummary,
   decideScreenObservationTouch,
   isBarePercentage,
   normalizeScreenObserverSummary,
   resolveObservationPrivacyState,
+  scoreTaskProgress,
+  scoreTaskStuck,
   TOUCH_THROTTLE_WINDOW_MS,
+  transitionTaskWorkingState,
 } from '@proj-airi/server-sdk-shared'
+import type { TaskObservationFrame, TaskWorkingState } from '@proj-airi/server-sdk-shared'
 
 const now = new Date('2026-06-11T03:00:00.000Z')
 
@@ -27,6 +32,18 @@ function createActiveTask() {
       allowedApps: ['obsidian'],
     },
   }, now)
+}
+
+function createTaskFrame(input: Partial<TaskObservationFrame> = {}): TaskObservationFrame {
+  return {
+    taskId: 'task-1',
+    capturedAt: now.toISOString(),
+    appNames: ['Obsidian'],
+    summary: 'Editing the quarterly report outline.',
+    confidence: 0.8,
+    privacyFiltered: true,
+    ...input,
+  }
 }
 
 describe('screen observation domain contract', () => {
@@ -325,5 +342,213 @@ describe('screen observation domain contract', () => {
 
     expect(isBarePercentage(adversarial)).toBe(false)
     expect(performance.now() - startedAt).toBeLessThan(500)
+  })
+
+  it('scores repeated same error as stuck and requests one nudge', () => {
+    const task = createActiveTask()
+    const frames = [
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:49:00.000Z',
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:55:00.000Z',
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+      createTaskFrame({
+        capturedAt: now.toISOString(),
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+    ]
+
+    const stuck = scoreTaskStuck({
+      task,
+      frame: frames[2],
+      recentFrames: frames.slice(0, 2),
+      now,
+    })
+    const transition = transitionTaskWorkingState({
+      task,
+      frame: frames[2],
+      recentFrames: frames.slice(0, 2),
+      now,
+    })
+
+    expect(stuck.score).toBeGreaterThanOrEqual(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckScoreThreshold)
+    expect(stuck.evidence.map(entry => entry.kind)).toContain('repeated_error')
+    expect(transition.state).toMatchObject({
+      state: 'stuck',
+      stuckStartedAt: '2026-06-11T02:49:00.000Z',
+    })
+    expect(transition.signal).toMatchObject({
+      kind: 'stuck_detected',
+      shouldNudge: true,
+      recommendedTouchReason: 'task_blocked',
+    })
+  })
+
+  it('scores a search and docs loop without progress as stuck', () => {
+    const task = createActiveTask()
+    const frames = [
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:49:00.000Z',
+        appNames: ['Browser'],
+        windowFingerprint: 'docs:node-memory',
+        summary: 'Reading Node documentation about memory leaks.',
+      }),
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:53:00.000Z',
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:memory-test',
+        summary: 'Running the report memory test output in terminal.',
+      }),
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:56:00.000Z',
+        appNames: ['Browser'],
+        windowFingerprint: 'search:node-memory',
+        summary: 'Searching Stack Overflow for memory leak diagnostics.',
+      }),
+      createTaskFrame({
+        capturedAt: now.toISOString(),
+        appNames: ['Code'],
+        windowFingerprint: 'editor:memory-test',
+        summary: 'Looking at the same test trace in the code editor.',
+      }),
+    ]
+
+    const stuck = scoreTaskStuck({
+      task,
+      frame: frames[3],
+      recentFrames: frames.slice(0, 3),
+      now,
+    })
+    const transition = transitionTaskWorkingState({
+      task,
+      frame: frames[3],
+      recentFrames: frames.slice(0, 3),
+      now,
+    })
+
+    expect(stuck.evidence.map(entry => entry.kind)).toContain('search_doc_loop')
+    expect(transition.signal).toMatchObject({
+      kind: 'stuck_detected',
+      shouldNudge: true,
+      recommendedTouchReason: 'task_blocked',
+    })
+  })
+
+  it('decays stuck score when normal progress appears', () => {
+    const task = createActiveTask()
+    const previousState: TaskWorkingState = {
+      taskId: task.id,
+      state: 'possibly_stuck',
+      progressScore: 0.2,
+      stuckScore: 4,
+      evidenceChain: [],
+      stuckStartedAt: '2026-06-11T02:45:00.000Z',
+    }
+    const frame = createTaskFrame({
+      appNames: ['Obsidian'],
+      summary: 'Fixed the report outline gap and completed the charts section.',
+      progressEvidence: [{
+        kind: 'subgoal_progress',
+        description: 'Charts section completed.',
+        weight: 2,
+      }],
+    })
+
+    const progress = scoreTaskProgress({ task, frame, previousState, now })
+    const transition = transitionTaskWorkingState({ task, frame, previousState, now })
+
+    expect(progress.score).toBeGreaterThanOrEqual(DEFAULT_TASK_COMPANION_THRESHOLDS.progressScoreThreshold)
+    expect(transition.state.state).toBe('progressing')
+    expect(transition.state.stuckScore).toBeLessThan(previousState.stuckScore)
+    expect(transition.state.stuckStartedAt).toBeUndefined()
+    expect(transition.signal).toMatchObject({
+      kind: 'progress_detected',
+      shouldNudge: false,
+      recommendedTouchReason: 'task_progress',
+    })
+  })
+
+  it('keeps off-task observations out of stuck nudges', () => {
+    const task = createActiveTask()
+    const previousState: TaskWorkingState = {
+      taskId: task.id,
+      state: 'possibly_stuck',
+      progressScore: 0,
+      stuckScore: 2.5,
+      evidenceChain: [],
+    }
+    const frame = createTaskFrame({
+      appNames: ['Slack'],
+      summary: 'Reading an unrelated launch chat.',
+      offTaskEvidence: [{
+        kind: 'off_task',
+        description: 'Focused app is unrelated to the active report task.',
+      }],
+    })
+
+    const stuck = scoreTaskStuck({ task, frame, previousState, now })
+    const transition = transitionTaskWorkingState({ task, frame, previousState, now })
+
+    expect(stuck.score).toBe(0)
+    expect(transition.state.state).toBe('off_task')
+    expect(transition.signal).toMatchObject({
+      kind: 'off_task',
+      shouldNudge: false,
+    })
+  })
+
+  it('only nudges once for the same stuck episode during cooldown', () => {
+    const task = createActiveTask()
+    const frames = [
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:49:00.000Z',
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+      createTaskFrame({
+        capturedAt: '2026-06-11T02:55:00.000Z',
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+      createTaskFrame({
+        capturedAt: now.toISOString(),
+        appNames: ['Terminal'],
+        windowFingerprint: 'terminal:error:heap-out-of-memory',
+        summary: 'Error: JavaScript heap out of memory while running the report tests.',
+      }),
+    ]
+
+    const first = transitionTaskWorkingState({
+      task,
+      frame: frames[2],
+      recentFrames: frames.slice(0, 2),
+      now,
+    })
+    const second = transitionTaskWorkingState({
+      task,
+      frame: frames[2],
+      recentFrames: frames.slice(0, 2),
+      previousState: first.state,
+      now: new Date(now.getTime() + 60 * 1000),
+    })
+
+    expect(first.signal.shouldNudge).toBe(true)
+    expect(second.signal).toMatchObject({
+      kind: 'stuck_detected',
+      shouldNudge: false,
+      episodeId: first.signal.episodeId,
+    })
+    expect(second.state.lastNudgeAt).toBe(first.state.lastNudgeAt)
   })
 })

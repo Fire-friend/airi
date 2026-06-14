@@ -292,6 +292,141 @@ export interface DecideDailySummaryInput {
   touch?: TouchEventPayload
 }
 
+export type TaskCompanionState = 'idle' | 'progressing' | 'possibly_stuck' | 'stuck' | 'off_task'
+
+export type TaskCompanionSignalKind
+  = | 'progress_detected'
+    | 'possible_stuck'
+    | 'stuck_detected'
+    | 'off_task'
+    | 'idle'
+
+export type TaskObservationEvidenceKind
+  = | 'semantic_progress'
+    | 'subgoal_progress'
+    | 'new_task_artifact'
+    | 'repeated_error'
+    | 'search_doc_loop'
+    | 'no_progress'
+    | 'semantic_blocker'
+    | 'off_task'
+
+export interface TaskObservationEvidence {
+  kind: TaskObservationEvidenceKind
+  description: string
+  fingerprint?: string
+  weight?: number
+  capturedAt?: string
+  summaryId?: string
+}
+
+export interface TaskObservationFrame {
+  taskId: string
+  capturedAt: string
+  summaryId?: string
+  windowStartedAt?: string
+  windowEndedAt?: string
+  appNames: string[]
+  windowFingerprint?: string
+  summary: string
+  progressEvidence?: TaskObservationEvidence[]
+  stuckEvidence?: TaskObservationEvidence[]
+  offTaskEvidence?: TaskObservationEvidence[]
+  confidence?: number
+  privacyFiltered: boolean
+}
+
+export interface TaskWorkingState {
+  taskId: string
+  state: TaskCompanionState
+  progressScore: number
+  stuckScore: number
+  evidenceChain: TaskObservationEvidence[]
+  lastProgressAt?: string
+  lastEvidenceAt?: string
+  stuckStartedAt?: string
+  lastNudgeAt?: string
+  mutedUntil?: string
+  episodeId?: string
+}
+
+export interface TaskCompanionSignal {
+  taskId: string
+  kind: TaskCompanionSignalKind
+  state: TaskCompanionState
+  createdAt: string
+  score: number
+  confidence: number
+  evidence: TaskObservationEvidence[]
+  shouldNudge: boolean
+  recommendedTouchReason?: TouchReason
+  episodeId?: string
+}
+
+export interface TaskCompanionThresholds {
+  maxScore: number
+  progressScoreThreshold: number
+  progressStuckDecay: number
+  idleScoreDecay: number
+  semanticProgressWeight: number
+  semanticBlockerWeight: number
+  repeatedFingerprintCount: number
+  repeatedFingerprintWindowMs: number
+  repeatedFingerprintWeight: number
+  searchLoopFrameCount: number
+  searchLoopWindowMs: number
+  searchLoopWeight: number
+  noProgressWindowMs: number
+  noProgressWeight: number
+  possibleStuckScoreThreshold: number
+  stuckScoreThreshold: number
+  stuckDurationMs: number
+  nudgeCooldownMs: number
+  evidenceChainCap: number
+}
+
+export interface TaskCompanionScoringInput {
+  task: Task
+  frame: TaskObservationFrame
+  recentFrames?: TaskObservationFrame[]
+  previousState?: TaskWorkingState
+  thresholds?: Partial<TaskCompanionThresholds>
+  now?: Date
+}
+
+export interface TaskCompanionScore {
+  score: number
+  confidence: number
+  evidence: TaskObservationEvidence[]
+}
+
+export interface TaskCompanionTransition {
+  state: TaskWorkingState
+  signal: TaskCompanionSignal
+}
+
+export const DEFAULT_TASK_COMPANION_THRESHOLDS: TaskCompanionThresholds = {
+  maxScore: 5,
+  progressScoreThreshold: 1.5,
+  progressStuckDecay: 0.35,
+  idleScoreDecay: 0.8,
+  semanticProgressWeight: 1,
+  semanticBlockerWeight: 1,
+  repeatedFingerprintCount: 3,
+  repeatedFingerprintWindowMs: 10 * 60 * 1000,
+  repeatedFingerprintWeight: 2.5,
+  searchLoopFrameCount: 4,
+  searchLoopWindowMs: 10 * 60 * 1000,
+  searchLoopWeight: 3,
+  noProgressWindowMs: 15 * 60 * 1000,
+  noProgressWeight: 1,
+  possibleStuckScoreThreshold: 1.75,
+  stuckScoreThreshold: 3,
+  stuckDurationMs: 10 * 60 * 1000,
+  nudgeCooldownMs: TOUCH_THROTTLE_WINDOW_MS,
+  evidenceChainCap: 20,
+}
+
 const touchRank: Record<TouchLevel, number> = {
   L0: 0,
   L1: 1,
@@ -399,6 +534,410 @@ export function normalizeScreenObserverSummary(input: NormalizeSummaryInput): Sc
     summary: input.summary,
     confidence: clampConfidence(input.confidence ?? 1),
     rawReference: input.rawReference,
+  }
+}
+
+const progressTerms = [
+  'completed',
+  'done',
+  'fixed',
+  'implemented',
+  'located',
+  'passed',
+  'resolved',
+  'updated',
+  'wrote',
+]
+
+const blockerTerms = [
+  'blocked',
+  'cannot',
+  'crash',
+  'error',
+  'exception',
+  'failed',
+  'failing',
+  'stuck',
+  'timeout',
+]
+
+const searchDocTerms = [
+  'docs',
+  'documentation',
+  'google',
+  'search',
+  'stackoverflow',
+  'stack overflow',
+]
+
+const workSurfaceTerms = [
+  'code',
+  'console',
+  'editor',
+  'error',
+  'terminal',
+  'test',
+  'trace',
+]
+
+function companionThresholds(input?: Partial<TaskCompanionThresholds>): TaskCompanionThresholds {
+  return { ...DEFAULT_TASK_COMPANION_THRESHOLDS, ...input }
+}
+
+function normalizeCompanionText(value: string | undefined): string {
+  return (value ?? '').toLowerCase().replaceAll(/\s+/g, ' ').trim()
+}
+
+function frameText(frame: TaskObservationFrame): string {
+  return normalizeCompanionText([
+    frame.summary,
+    frame.windowFingerprint,
+    ...frame.appNames,
+  ].filter(Boolean).join(' '))
+}
+
+function containsAnyTerm(text: string, terms: readonly string[]): boolean {
+  return terms.some(term => text.includes(term))
+}
+
+function evidenceWeight(evidence: TaskObservationEvidence): number {
+  return Math.max(0, evidence.weight ?? 1)
+}
+
+function evidenceAt(evidence: TaskObservationEvidence, fallback: string): TaskObservationEvidence {
+  return { ...evidence, capturedAt: evidence.capturedAt ?? fallback }
+}
+
+function frameFingerprint(frame: TaskObservationFrame): string | undefined {
+  return normalizeCompanionText(frame.windowFingerprint || frame.summary).slice(0, 160) || undefined
+}
+
+function frameTime(frame: TaskObservationFrame): number {
+  return new Date(frame.capturedAt).getTime()
+}
+
+function durationMs(frames: readonly TaskObservationFrame[]): number {
+  const times = frames.map(frameTime).filter(Number.isFinite)
+  if (times.length === 0)
+    return 0
+
+  return Math.max(...times) - Math.min(...times)
+}
+
+function recentFrameSet(frame: TaskObservationFrame, recentFrames: readonly TaskObservationFrame[] | undefined): TaskObservationFrame[] {
+  const frames = [...(recentFrames ?? []), frame]
+  const seen = new Set<string>()
+  return frames.filter((candidate) => {
+    const key = `${candidate.summaryId ?? ''}:${candidate.capturedAt}:${candidate.windowFingerprint ?? candidate.summary}`
+    if (seen.has(key))
+      return false
+    seen.add(key)
+    return true
+  }).sort((a, b) => frameTime(a) - frameTime(b))
+}
+
+function repeatedFingerprintEvidence(
+  frame: TaskObservationFrame,
+  recentFrames: readonly TaskObservationFrame[],
+  thresholds: TaskCompanionThresholds,
+): TaskObservationEvidence | undefined {
+  const fingerprint = frameFingerprint(frame)
+  if (!fingerprint)
+    return undefined
+
+  const repeatedFrames = recentFrames.filter(candidate => frameFingerprint(candidate) === fingerprint)
+  if (repeatedFrames.length < thresholds.repeatedFingerprintCount)
+    return undefined
+  if (durationMs(repeatedFrames) < thresholds.repeatedFingerprintWindowMs)
+    return undefined
+  if (!repeatedFrames.some(candidate => containsAnyTerm(frameText(candidate), blockerTerms) || candidate.stuckEvidence?.length))
+    return undefined
+
+  return {
+    kind: 'repeated_error',
+    description: `Same task surface repeated ${repeatedFrames.length} times without enough progress evidence.`,
+    fingerprint,
+    weight: thresholds.repeatedFingerprintWeight,
+    capturedAt: frame.capturedAt,
+    summaryId: frame.summaryId,
+  }
+}
+
+function frameCompanionCategory(frame: TaskObservationFrame): 'search_or_docs' | 'work_surface' | 'other' {
+  const text = frameText(frame)
+  if (containsAnyTerm(text, searchDocTerms))
+    return 'search_or_docs'
+  if (containsAnyTerm(text, workSurfaceTerms))
+    return 'work_surface'
+  return 'other'
+}
+
+function searchDocLoopEvidence(
+  frame: TaskObservationFrame,
+  recentFrames: readonly TaskObservationFrame[],
+  thresholds: TaskCompanionThresholds,
+): TaskObservationEvidence | undefined {
+  const frames = recentFrames.filter(candidate => candidate.privacyFiltered)
+  if (frames.length < thresholds.searchLoopFrameCount)
+    return undefined
+  if (durationMs(frames) < thresholds.searchLoopWindowMs)
+    return undefined
+
+  const categories = frames.map(frameCompanionCategory)
+  const searchCount = categories.filter(category => category === 'search_or_docs').length
+  const workCount = categories.filter(category => category === 'work_surface').length
+  const transitions = categories.reduce((total, category, index) => {
+    if (index === 0)
+      return total
+    return category !== 'other' && categories[index - 1] !== 'other' && category !== categories[index - 1]
+      ? total + 1
+      : total
+  }, 0)
+
+  if (searchCount < 2 || workCount < 2 || transitions < 2)
+    return undefined
+
+  return {
+    kind: 'search_doc_loop',
+    description: 'Task alternated between work surfaces and search/docs without enough progress evidence.',
+    fingerprint: 'search-doc-loop',
+    weight: thresholds.searchLoopWeight,
+    capturedAt: frame.capturedAt,
+    summaryId: frame.summaryId,
+  }
+}
+
+function noProgressEvidence(
+  frame: TaskObservationFrame,
+  previousState: TaskWorkingState | undefined,
+  thresholds: TaskCompanionThresholds,
+  now: Date,
+): TaskObservationEvidence | undefined {
+  if (!previousState?.lastProgressAt)
+    return undefined
+  if (now.getTime() - new Date(previousState.lastProgressAt).getTime() < thresholds.noProgressWindowMs)
+    return undefined
+
+  return {
+    kind: 'no_progress',
+    description: 'No progress evidence has appeared in the conservative stuck window.',
+    weight: thresholds.noProgressWeight,
+    capturedAt: frame.capturedAt,
+    summaryId: frame.summaryId,
+  }
+}
+
+function initialTaskWorkingState(taskId: string): TaskWorkingState {
+  return {
+    taskId,
+    state: 'idle',
+    progressScore: 0,
+    stuckScore: 0,
+    evidenceChain: [],
+  }
+}
+
+function companionEvidenceChain(
+  previousState: TaskWorkingState,
+  evidence: readonly TaskObservationEvidence[],
+  thresholds: TaskCompanionThresholds,
+): TaskObservationEvidence[] {
+  return [...previousState.evidenceChain, ...evidence]
+    .slice(-thresholds.evidenceChainCap)
+}
+
+function companionEpisodeId(evidence: readonly TaskObservationEvidence[], frame: TaskObservationFrame): string | undefined {
+  const fingerprint = evidence.find(entry => entry.fingerprint)?.fingerprint ?? frameFingerprint(frame)
+  return fingerprint ? `stuck:${fingerprint}` : undefined
+}
+
+function earliestFrameAt(frames: readonly TaskObservationFrame[]): string | undefined {
+  return frames
+    .map(frame => frame.capturedAt)
+    .sort()[0]
+}
+
+function canNudgeTaskCompanion(
+  previousState: TaskWorkingState,
+  nextState: TaskCompanionState,
+  episodeId: string | undefined,
+  thresholds: TaskCompanionThresholds,
+  now: Date,
+): boolean {
+  if (nextState !== 'stuck')
+    return false
+  if (previousState.mutedUntil && new Date(previousState.mutedUntil).getTime() > now.getTime())
+    return false
+  if (previousState.lastNudgeAt && episodeId === previousState.episodeId)
+    return false
+  if (!previousState.lastNudgeAt)
+    return true
+
+  return now.getTime() - new Date(previousState.lastNudgeAt).getTime() >= thresholds.nudgeCooldownMs
+}
+
+export function scoreTaskProgress(input: TaskCompanionScoringInput): TaskCompanionScore {
+  if (!input.frame.privacyFiltered || input.frame.taskId !== input.task.id)
+    return { score: 0, confidence: 0, evidence: [] }
+
+  const thresholds = companionThresholds(input.thresholds)
+  const evidence = (input.frame.progressEvidence ?? [])
+    .map(entry => evidenceAt(entry, input.frame.capturedAt))
+  const text = frameText(input.frame)
+
+  if (containsAnyTerm(text, progressTerms)) {
+    evidence.push({
+      kind: 'semantic_progress',
+      description: 'Summary contains conservative progress language.',
+      weight: thresholds.semanticProgressWeight,
+      capturedAt: input.frame.capturedAt,
+      summaryId: input.frame.summaryId,
+    })
+  }
+
+  const score = Math.min(thresholds.maxScore, evidence.reduce((total, entry) => total + evidenceWeight(entry), 0))
+  return {
+    score,
+    confidence: clampConfidence(score / thresholds.progressScoreThreshold),
+    evidence,
+  }
+}
+
+export function scoreTaskStuck(input: TaskCompanionScoringInput): TaskCompanionScore {
+  if (!input.frame.privacyFiltered || input.frame.taskId !== input.task.id || input.frame.offTaskEvidence?.length)
+    return { score: 0, confidence: 0, evidence: [] }
+
+  const thresholds = companionThresholds(input.thresholds)
+  const now = input.now ?? new Date(input.frame.capturedAt)
+  const recentFrames = recentFrameSet(input.frame, input.recentFrames)
+  const progress = scoreTaskProgress(input)
+  const evidence = (input.frame.stuckEvidence ?? [])
+    .map(entry => evidenceAt(entry, input.frame.capturedAt))
+
+  const text = frameText(input.frame)
+  if (containsAnyTerm(text, blockerTerms)) {
+    evidence.push({
+      kind: 'semantic_blocker',
+      description: 'Summary contains conservative blocker language.',
+      weight: thresholds.semanticBlockerWeight,
+      capturedAt: input.frame.capturedAt,
+      summaryId: input.frame.summaryId,
+    })
+  }
+
+  const repeated = repeatedFingerprintEvidence(input.frame, recentFrames, thresholds)
+  if (repeated)
+    evidence.push(repeated)
+
+  const loop = progress.score === 0 ? searchDocLoopEvidence(input.frame, recentFrames, thresholds) : undefined
+  if (loop)
+    evidence.push(loop)
+
+  const idle = progress.score === 0 ? noProgressEvidence(input.frame, input.previousState, thresholds, now) : undefined
+  if (idle)
+    evidence.push(idle)
+
+  const score = Math.min(thresholds.maxScore, evidence.reduce((total, entry) => total + evidenceWeight(entry), 0))
+  return {
+    score,
+    confidence: clampConfidence(score / thresholds.stuckScoreThreshold),
+    evidence,
+  }
+}
+
+export function transitionTaskWorkingState(input: TaskCompanionScoringInput): TaskCompanionTransition {
+  const thresholds = companionThresholds(input.thresholds)
+  const now = input.now ?? new Date(input.frame.capturedAt)
+  const previousState = input.previousState ?? initialTaskWorkingState(input.task.id)
+  const recentFrames = recentFrameSet(input.frame, input.recentFrames)
+  const offTaskEvidence = input.frame.taskId !== input.task.id
+    ? [{
+        kind: 'off_task' as const,
+        description: 'Observation frame belongs to a different task.',
+        capturedAt: input.frame.capturedAt,
+        summaryId: input.frame.summaryId,
+      }]
+    : (input.frame.offTaskEvidence ?? []).map(entry => evidenceAt(entry, input.frame.capturedAt))
+  const progress = scoreTaskProgress(input)
+  const stuck = scoreTaskStuck(input)
+
+  let nextCompanionState: TaskCompanionState = 'idle'
+  let nextProgressScore = Math.min(thresholds.maxScore, previousState.progressScore * thresholds.idleScoreDecay + progress.score)
+  let nextStuckScore = Math.min(thresholds.maxScore, previousState.stuckScore * thresholds.idleScoreDecay + stuck.score)
+  let lastProgressAt = previousState.lastProgressAt
+  let stuckStartedAt = previousState.stuckStartedAt
+
+  if (!input.frame.privacyFiltered) {
+    nextCompanionState = 'idle'
+    nextStuckScore = previousState.stuckScore * thresholds.idleScoreDecay
+    stuckStartedAt = undefined
+  }
+  else if (offTaskEvidence.length > 0) {
+    nextCompanionState = 'off_task'
+    nextStuckScore = previousState.stuckScore * thresholds.idleScoreDecay
+    stuckStartedAt = undefined
+  }
+  else if (progress.score >= thresholds.progressScoreThreshold) {
+    nextCompanionState = 'progressing'
+    lastProgressAt = now.toISOString()
+    nextStuckScore = Math.max(0, previousState.stuckScore * thresholds.progressStuckDecay - progress.score)
+    stuckStartedAt = undefined
+  }
+  else if (nextStuckScore >= thresholds.possibleStuckScoreThreshold) {
+    stuckStartedAt = previousState.stuckStartedAt ?? earliestFrameAt(recentFrames) ?? now.toISOString()
+    const stuckDurationMs = now.getTime() - new Date(stuckStartedAt).getTime()
+    nextCompanionState = nextStuckScore >= thresholds.stuckScoreThreshold && stuckDurationMs >= thresholds.stuckDurationMs
+      ? 'stuck'
+      : 'possibly_stuck'
+  }
+
+  if (nextCompanionState === 'idle')
+    stuckStartedAt = undefined
+
+  const evidence = nextCompanionState === 'off_task'
+    ? offTaskEvidence
+    : [...progress.evidence, ...stuck.evidence]
+  const episodeId = nextCompanionState === 'stuck'
+    ? companionEpisodeId(stuck.evidence, input.frame)
+    : undefined
+  const shouldNudge = canNudgeTaskCompanion(previousState, nextCompanionState, episodeId, thresholds, now)
+  const nextState: TaskWorkingState = {
+    ...previousState,
+    taskId: input.task.id,
+    state: nextCompanionState,
+    progressScore: Math.round(nextProgressScore * 100) / 100,
+    stuckScore: Math.round(nextStuckScore * 100) / 100,
+    evidenceChain: companionEvidenceChain(previousState, evidence, thresholds),
+    lastProgressAt,
+    lastEvidenceAt: evidence.length > 0 ? now.toISOString() : previousState.lastEvidenceAt,
+    stuckStartedAt,
+    lastNudgeAt: shouldNudge ? now.toISOString() : previousState.lastNudgeAt,
+    episodeId,
+  }
+  const signalKind: TaskCompanionSignalKind = nextCompanionState === 'progressing'
+    ? 'progress_detected'
+    : nextCompanionState === 'possibly_stuck'
+      ? 'possible_stuck'
+      : nextCompanionState === 'stuck'
+        ? 'stuck_detected'
+        : nextCompanionState === 'off_task'
+          ? 'off_task'
+          : 'idle'
+
+  return {
+    state: nextState,
+    signal: {
+      taskId: input.task.id,
+      kind: signalKind,
+      state: nextCompanionState,
+      createdAt: now.toISOString(),
+      score: nextCompanionState === 'progressing' ? progress.score : nextStuckScore,
+      confidence: nextCompanionState === 'progressing' ? progress.confidence : clampConfidence(nextStuckScore / thresholds.stuckScoreThreshold),
+      evidence,
+      shouldNudge,
+      recommendedTouchReason: nextCompanionState === 'stuck' ? 'task_blocked' : nextCompanionState === 'progressing' ? 'task_progress' : undefined,
+      episodeId,
+    },
   }
 }
 
