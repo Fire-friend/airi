@@ -4,6 +4,9 @@ import type {
   ScreenObservationSettings,
   ScreenObserverSummary,
   Task,
+  TaskCompanionSignal,
+  TaskObservationFrame,
+  TaskWorkingState,
   TouchEventPayload,
 } from '@proj-airi/server-sdk-shared'
 import type { BrowserWindow } from 'electron'
@@ -22,8 +25,10 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import {
   decideScreenObservationTouch,
   DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
+  DEFAULT_TASK_COMPANION_THRESHOLDS,
   resolveObservationPrivacyState,
   TOUCH_THROTTLE_WINDOW_MS,
+  transitionTaskWorkingState,
 } from '@proj-airi/server-sdk-shared'
 import { globalShortcut, Notification } from 'electron'
 import { array, boolean, check, maxLength, minLength, minValue, number, object, optional, picklist, pipe, record, regex, safeParse, string, summarize, trim } from 'valibot'
@@ -153,6 +158,29 @@ const taskSchema = object({
 
 const upsertTaskRequestSchema = object({ task: taskSchema })
 
+const taskObservationEvidenceSchema = object({
+  kind: picklist(['semantic_progress', 'subgoal_progress', 'new_task_artifact', 'repeated_error', 'search_doc_loop', 'no_progress', 'semantic_blocker', 'off_task']),
+  description: string(),
+  fingerprint: optional(string()),
+  weight: optional(number()),
+  capturedAt: optional(string()),
+  summaryId: optional(string()),
+})
+
+const taskWorkingStateSchema = object({
+  taskId: string(),
+  state: picklist(['idle', 'progressing', 'possibly_stuck', 'stuck', 'off_task']),
+  progressScore: number(),
+  stuckScore: number(),
+  evidenceChain: array(taskObservationEvidenceSchema),
+  lastProgressAt: optional(string()),
+  lastEvidenceAt: optional(string()),
+  stuckStartedAt: optional(string()),
+  lastNudgeAt: optional(string()),
+  mutedUntil: optional(string()),
+  episodeId: optional(string()),
+})
+
 const screenObservationConfigSchema = object({
   enabled: optional(boolean()),
   allowedApps: optional(array(string())),
@@ -197,6 +225,11 @@ const screenObservationConfigSchema = object({
     lastDecidedAt: optional(string()),
     firstProgressDeliveredAt: optional(string()),
   }))),
+  // The task currently in "active companion" mode (MVP: one at a time).
+  activeTaskId: optional(string()),
+  // Per-task companion working state; survives restarts so stuck-score
+  // accumulates across sessions.
+  taskWorkingStates: optional(record(string(), taskWorkingStateSchema)),
 })
 
 type ScreenObservationConfig = InferOutput<typeof screenObservationConfigSchema>
@@ -297,6 +330,9 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   const openTaskDetailsListeners = new Set<(taskId: string) => void>()
 
   const suppression = { isFullscreen: false, isMeeting: false }
+  // In-memory frame buffer: last evidenceChainCap frames per task, not persisted.
+  // Feeds the companion's repeated-fingerprint and search-loop detectors.
+  const recentFrames = new Map<string, TaskObservationFrame[]>()
   let observationSourceAvailable = false
   let latestSummaryAt: string | undefined
   let latestCurrentStateAt: string | undefined
@@ -426,7 +462,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   const upsertTask: ScreenObserverService['upsertTask'] = (task) => {
-    persist({ tasks: { ...getConfig().tasks, [task.id]: task } })
+    const stored = getConfig()
+    const patch: Partial<ScreenObservationConfig> = { tasks: { ...stored.tasks, [task.id]: task } }
+    if (task.status === 'active')
+      patch.activeTaskId = task.id
+    else if (stored.activeTaskId === task.id)
+      patch.activeTaskId = undefined
+    persist(patch)
     return publishStateIfChanged()
   }
 
@@ -498,6 +540,20 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
           broadcast(context => context.emit(electronScreenObservationSummaryCaptured, { summary }))
           publishStateIfChanged()
           decideProgressTouches(summary, now)
+
+          // C2: task-companion inference for the single activeTask.
+          // Privacy / suppression already cleared by shouldCaptureScreen() above.
+          const storedCfg = getConfig()
+          const activeTask = storedCfg.activeTaskId
+            ? (storedCfg.tasks ?? {})[storedCfg.activeTaskId]
+            : undefined
+          if (activeTask && activeTask.status === 'active') {
+            const frame = buildObservationFrame(summary, activeTask, now)
+            if (frame) {
+              const signal = runTaskCompanion(frame, activeTask, now)
+              decideCompanionTouch(signal, activeTask, summary.id, now)
+            }
+          }
         }
       }
     }
@@ -587,6 +643,20 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       latestCurrentStateAt = currentState.capturedAt
       broadcast(context => context.emit(electronScreenObservationCurrentStateCaptured, currentState))
       publishStateIfChanged()
+
+      // C2: fast-track companion update — window fingerprint feeds the
+      // repeated-fingerprint detector so stuck score accumulates between
+      // long-memory ticks. No touch is dispatched here; only the long-memory
+      // tick drives touch decisions to avoid noise from transient snapshots.
+      const storedCfg = getConfig()
+      const activeTask = storedCfg.activeTaskId
+        ? (storedCfg.tasks ?? {})[storedCfg.activeTaskId]
+        : undefined
+      if (activeTask && activeTask.status === 'active') {
+        const frame = buildCurrentStateFrame(currentState, activeTask, now)
+        if (frame)
+          runTaskCompanion(frame, activeTask, now)
+      }
     }
     catch (error) {
       log.withError(error).warn('current state tick failed')
@@ -722,6 +792,164 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     // Removal condition: count L3 ignores once a reliable dismissal signal
     // exists (e.g. notification center APIs or an in-app fallback surface).
     notification.show()
+  }
+
+  /**
+   * Converts a long-memory summary into a `TaskObservationFrame` bound to `task`.
+   *
+   * Returns `undefined` when none of the summary apps match the task's
+   * `allowedApps` whitelist — this signals off-task activity and the caller
+   * should skip companion inference for this tick.
+   *
+   * Privacy guarantee: only called after `shouldCaptureScreen` has passed,
+   * so `privacyFiltered: true` is safe to set unconditionally here.
+   */
+  function buildObservationFrame(summary: ScreenObserverSummary, task: Task, now: Date): TaskObservationFrame | undefined {
+    const taskApps = new Set(task.observation.allowedApps.map(a => a.toLowerCase()))
+    const matchedApps = taskApps.size === 0
+      ? summary.apps
+      : summary.apps.filter(app => taskApps.has(app.appName.toLowerCase()))
+
+    if (matchedApps.length === 0)
+      return undefined
+
+    const topApp = matchedApps[0]!
+    const windowFingerprint = topApp.windowTitle
+      ? `${topApp.appName.toLowerCase()}:${topApp.windowTitle.toLowerCase()}`
+      : topApp.appName.toLowerCase()
+
+    return {
+      taskId: task.id,
+      capturedAt: now.toISOString(),
+      summaryId: summary.id,
+      appNames: matchedApps.map(app => app.appName),
+      windowFingerprint,
+      // Summary text feeds the C1 keyword detectors inside scoreTaskProgress /
+      // scoreTaskStuck — no need to pre-compute evidence here.
+      summary: matchedApps.map(app => app.summary).filter(Boolean).join(' '),
+      confidence: summary.confidence,
+      privacyFiltered: true,
+    }
+  }
+
+  /**
+   * Converts a near-realtime current-state snapshot into a lightweight frame.
+   *
+   * The fast track contributes no VLM semantics — summary is empty. Its value
+   * is feeding window-fingerprint data to the repeated-fingerprint detector so
+   * stuck evidence accumulates before the next long-memory tick.
+   *
+   * Returns `undefined` when the focused app is absent or outside the task
+   * whitelist.
+   */
+  function buildCurrentStateFrame(currentState: ScreenObserverCurrentState, task: Task, now: Date): TaskObservationFrame | undefined {
+    if (!currentState.focusedApp)
+      return undefined
+
+    const { appName, windowTitle } = currentState.focusedApp
+    const taskApps = new Set(task.observation.allowedApps.map(a => a.toLowerCase()))
+
+    if (taskApps.size > 0 && !taskApps.has(appName.toLowerCase()))
+      return undefined
+
+    const windowFingerprint = windowTitle
+      ? `${appName.toLowerCase()}:${windowTitle.toLowerCase()}`
+      : appName.toLowerCase()
+
+    return {
+      taskId: task.id,
+      capturedAt: now.toISOString(),
+      appNames: [appName],
+      windowFingerprint,
+      summary: '',
+      confidence: 0.5,
+      privacyFiltered: true,
+    }
+  }
+
+  /**
+   * Runs the C1 task-companion kernel for `task` given a new observation `frame`.
+   *
+   * - Updates the in-memory `recentFrames` buffer (feeds repeated-fingerprint /
+   *   search-loop detectors on the next call).
+   * - Persists the new `TaskWorkingState` to config so stuck-score survives
+   *   app restarts.
+   * - Returns the `TaskCompanionSignal` for the caller to decide whether a touch
+   *   is warranted.
+   */
+  function runTaskCompanion(frame: TaskObservationFrame, task: Task, now: Date): TaskCompanionSignal {
+    const stored = getConfig()
+    const previousState: TaskWorkingState | undefined = stored.taskWorkingStates?.[task.id]
+    const taskRecentFrames = recentFrames.get(task.id) ?? []
+
+    const { state: nextState, signal } = transitionTaskWorkingState({
+      task,
+      frame,
+      recentFrames: taskRecentFrames,
+      previousState,
+      now,
+    })
+
+    // Cap the in-memory buffer at the same limit as the evidence chain.
+    const frameCap = DEFAULT_TASK_COMPANION_THRESHOLDS.evidenceChainCap
+    recentFrames.set(task.id, [...taskRecentFrames, frame].slice(-frameCap))
+
+    persist({
+      taskWorkingStates: {
+        ...stored.taskWorkingStates,
+        [task.id]: nextState,
+      },
+    })
+
+    return signal
+  }
+
+  /**
+   * Dispatches a `task_blocked` touch when the companion signals that the user
+   * is stuck and has not been nudged for this episode yet.
+   *
+   * Called after the long-memory tick only — the fast track updates working state
+   * but does not trigger touches, to avoid noise from transient fingerprint matches.
+   */
+  function decideCompanionTouch(signal: TaskCompanionSignal, task: Task, summaryId: string, now: Date) {
+    if (!signal.shouldNudge || signal.kind !== 'stuck_detected' || signal.recommendedTouchReason !== 'task_blocked')
+      return
+
+    const entry = ledgerEntryFor(task.id)
+    if (entry.mutedAt)
+      return
+
+    const isFirstTaskForUser = !getConfig().firstTaskProgressDelivered
+
+    const touch = decideScreenObservationTouch({
+      id: randomUUID(),
+      task,
+      reason: 'task_blocked',
+      message: {
+        remainingWork: task.progressNarrative?.remainingWork ?? '',
+        etaAt: task.progressNarrative?.etaAt,
+        pace: task.progressNarrative?.pace,
+        isOffTrack: true,
+      },
+      now,
+      summaryId,
+      lastL2PlusTouchAt: entry.lastL2PlusTouchAt ? new Date(entry.lastL2PlusTouchAt) : undefined,
+      ignoredTouchesAtSameLevel: entry.ignoredCount,
+      isFirstTaskForUser,
+      isFirstProgressUpdateForTask: !entry.firstProgressDeliveredAt,
+      isFullscreen: suppression.isFullscreen,
+      isMeeting: suppression.isMeeting,
+    })
+
+    saveLedgerEntry(task.id, {
+      ...entry,
+      lastDecidedAt: now.toISOString(),
+      firstProgressDeliveredAt: entry.firstProgressDeliveredAt ?? now.toISOString(),
+    })
+    if (isFirstTaskForUser)
+      persist({ firstTaskProgressDelivered: true })
+
+    deliverTouch(touch)
   }
 
   /**

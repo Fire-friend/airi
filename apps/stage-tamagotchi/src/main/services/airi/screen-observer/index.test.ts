@@ -6,7 +6,7 @@ import type { I18n } from '../../../libs/i18n'
 import type { MineContextClient } from './minecontext'
 
 import { createContext, defineInvoke } from '@moeru/eventa'
-import { createScreenObservationTask } from '@proj-airi/server-sdk-shared'
+import { createScreenObservationTask, DEFAULT_TASK_COMPANION_THRESHOLDS } from '@proj-airi/server-sdk-shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -219,6 +219,126 @@ describe('screen observer end-to-end bridge', () => {
     await expect(updateSettings({ dailySummaryAtLocalTime: '25:99' })).rejects.toThrow(/Invalid screen observation settings/)
     await expect(pause({ reason: 'whenever' } as unknown as Parameters<typeof pause>[0])).rejects.toThrow(/Invalid screen observation pause/)
     await expect(pause({ reason: 'manual_15m', pauseUntil: 'not-a-date' })).rejects.toThrow(/Invalid screen observation pause/)
+  })
+
+  it('upsertTask with status=active sets the active companion task', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    await updateSettings({ enabled: true, allowedApps: ['Code'] })
+
+    const task = activeTask('task-companion')
+    await upsertTask({ task })
+
+    // Advance one long-memory poll: companion frame should be built and
+    // companion should update working state (no stuck evidence yet, so no touch).
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+
+    // task_progress touch dispatched by the existing decideProgressTouches path;
+    // no task_blocked from companion (not stuck yet).
+    const progressTouches = touches.filter(t => t.reason === 'task_progress')
+    const blockedTouches = touches.filter(t => t.reason === 'task_blocked')
+    expect(progressTouches.length).toBeGreaterThan(0)
+    expect(blockedTouches).toHaveLength(0)
+  })
+
+  it('companion accumulates stuck evidence and dispatches task_blocked once per episode', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    // Override: summary with a blocker term so semantic_blocker evidence (weight 1)
+    // fires on every long-memory tick, accumulating stuckScore toward the threshold.
+    getActivities.mockResolvedValue([
+      {
+        id: 'ctx-stuck',
+        title: 'error in code',
+        summary: 'cannot fix the error in code',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-stuck',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: 'Code', window: 'report.md' },
+          },
+        ],
+      },
+    ])
+
+    await updateSettings({ enabled: true, allowedApps: ['Code'] })
+    await upsertTask({ task: activeTask('task-stuck') })
+
+    // Threshold recap (conservative defaults):
+    //   semanticBlockerWeight = 1   → each tick with blocker term adds 1 to stuckScore
+    //   stuckScoreThreshold   = 3   → needs stuckScore ≥ 3 (reached after ~5 ticks via decay)
+    //   stuckDurationMs       = 10 min → must be possibly_stuck for ≥ 10 min before 'stuck'
+    //   nudgeCooldownMs       = 30 min → per episode, prevents repeated nudges
+    //
+    // Ticks 1–3: semantic_blocker accumulates (summary has "error"); stuckScore after:
+    //   tick 1: 0 * 0.8 + 1 = 1.0  → idle (< possibleStuckThreshold 1.75)
+    //   tick 2: 1.0 * 0.8 + 1 = 1.8 → possibly_stuck; stuckStartedAt = first frame ts
+    //   tick 3: 1.8 * 0.8 + 1 = 2.44 → possibly_stuck; stuckDurationMs still < 10 min
+    // No task_blocked expected yet.
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    }
+    const blockedAfterThreeTicks = touches.filter(t => t.reason === 'task_blocked')
+    expect(blockedAfterThreeTicks).toHaveLength(0)
+
+    // Advance past stuckDurationMs (10 min) so the state can flip to 'stuck'.
+    // One more tick fires; stuckScore accumulates further and stuckDurationMs is met.
+    await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS)
+
+    const blockedTouches = touches.filter(t => t.reason === 'task_blocked')
+    expect(blockedTouches).toHaveLength(1)
+    expect(blockedTouches[0]!.taskId).toBe('task-stuck')
+
+    // Second stuck tick in same episode: shouldNudge=false → no additional touch.
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(1)
+  })
+
+  it('off-task apps do not trigger companion inference', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    await updateSettings({ enabled: true, allowedApps: ['Code'] })
+
+    // Task only allows 'Obsidian', but mock returns 'Code'.
+    const offTaskTask = createScreenObservationTask({
+      id: 'task-offtask',
+      userId: 'user-1',
+      title: 'Write docs',
+      status: 'active',
+      observation: { allowedApps: ['Obsidian'] },
+      progressNarrative: { remainingWork: 'three pages left', isOffTrack: false },
+    }, new Date('2026-06-11T10:00:00.000Z'))
+    await upsertTask({ task: offTaskTask })
+
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    // Advance many ticks — companion gets no frames (off-task app), no task_blocked.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    }
+    await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS)
+
+    const blockedTouches = touches.filter(t => t.reason === 'task_blocked')
+    expect(blockedTouches).toHaveLength(0)
   })
 
   it('falls back to an L2 notice and still stamps the throttle clock when system notifications are unsupported', async () => {
