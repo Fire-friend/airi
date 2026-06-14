@@ -240,8 +240,8 @@ AIRI is a **client-centric monorepo**. The agent runtime, context memory, and LL
 | **Desktop app** | `apps/stage-tamagotchi` | Electron shell, main process, Electron-only services (screen observer, tray, audio, plugin host) |
 | **Web app** | `apps/stage-web` | Browser-based stage — same Vue + stage-ui stack, no Electron APIs |
 | **Mobile app** | `apps/stage-pocket` | Capacitor shell for iOS / Android |
-| **Shared client** | `packages/stage-ui` | Vue stores, composables, and components shared between all front-ends; also where the agent runtime lives |
-| **Agent runtime** | `packages/core-agent` | LLM orchestration, chat-orchestrator-runtime, context registry, response categoriser — runs entirely client-side |
+| **Shared client** | `packages/stage-ui` | Vue stores (including `consciousness.ts` — the ontology/awareness container), composables, and components shared between all front-ends; heart of client-side orchestration |
+| **Agent runtime** | `packages/core-agent` | LLM orchestration, chat-orchestrator-runtime, context registry, response categoriser — runs entirely client-side in the renderer |
 | **Local relay** | `packages/server-runtime` | WebSocket channel server (`ws://localhost:6121`), embedded in the desktop app; fans out `context:update` events to connected windows/clients |
 | **Client SDK** | `packages/server-sdk` | WebSocket `Client` for connecting `stage-ui` to `server-runtime` |
 | **Shared contracts** | `packages/server-sdk-shared` | Privacy states, task model, touch policy, observation types — the single source of truth for cross-boundary types |
@@ -259,21 +259,23 @@ flowchart TD
     MC["MineContext daemon\n(opencontext, localhost:1733)\nscreenshot capture every ~5s\nVLM activity summary every ~10min"]
 
     subgraph MAIN["Electron main process (stage-tamagotchi)"]
-        SO["screen-observer/index.ts\nTwo polling timers"]
+        SO["ScreenObserverService\nTwo polling timers"]
         CS["current-state tick\n(polls raw_context every 15s)"]
         LM["long-memory tick\n(polls activity_context every 30s)\nhealth-check on each tick"]
-        WL["allowedApps whitelist\n(silent drop if not listed)"]
+        WL["Privacy Layer 1 — allowedApps whitelist\n(silent drop if not listed)\nfullscreen / meeting auto-suppression"]
         IPC["Eventa IPC bridge\n(type-safe main ↔ renderer)"]
     end
 
     subgraph RENDERER["Renderer process — packages/stage-ui"]
         BR["screen-observation bridge\nreceives IPC events"]
-        CU["applyCurrentState()\n→ contextId: screen-observation:current-state\nContextUpdateStrategy.ReplaceSelf"]
-        LMI["applySummary() / ingestLongMemorySummary()\nbuild LongMemoryCandidate"]
+        DL["Privacy Layer 2 — renderer denylist\n(sensitive-app patterns:\n1Password, Incognito, etc.)"]
+        CU["applyCurrentState()\n→ contextId: screen-observation:current-state\nephemeral / ReplaceSelf"]
+        LMI["ingestLongMemorySummary()\nbuild LongMemoryCandidate\n(fnv1a hash dedup)"]
         FH["updateHabitFacets()\nevidence + days + decay gate"]
         SF["stable facet promoted\n→ contextId: screen-observation:long-memory-candidates"]
         PF["provisional facet\n(accumulating, not yet in context)"]
-        CH["channel-server.ts\nsendContextUpdate()\nWS context:update → ws://localhost:6121"]
+        ONT["Ontology / consciousness.ts\n(agent awareness container)"]
+        CH["sendContextUpdate()\nWS context:update → ws://localhost:6121"]
     end
 
     subgraph RELAY["packages/server-runtime (port 6121, embedded in desktop app)"]
@@ -295,13 +297,15 @@ flowchart TD
     LM --> WL
     WL -->|filtered app contexts| IPC
     IPC --> BR
-    BR --> CU
-    BR --> LMI
+    BR --> DL
+    DL -->|near-realtime track| CU
+    DL -->|long-memory track| LMI
     LMI --> FH
     FH -->|evidenceCount≥3, distinctDays≥2, decayedEvidence≥2.5| SF
     FH -->|below threshold| PF
-    CU --> CH
-    SF --> CH
+    CU --> ONT
+    SF --> ONT
+    ONT --> CH
     CH --> SR
     SR --> CB
     CB --> CR
@@ -309,7 +313,7 @@ flowchart TD
     ORCH --> PROV
 ```
 
-**Privacy note**: the allowedApps whitelist runs at the main-process level — only apps you explicitly list pass through the IPC bridge. Fullscreen and meeting surfaces are suppressed automatically. Manual pause (Ctrl/Cmd+Alt+P) stops observation for 15 min / 1 h / rest of day.
+**Privacy**: observation passes through two independent filter layers. Layer 1 (main process): only apps on the `allowedApps` whitelist pass through the IPC bridge; fullscreen and meeting surfaces are suppressed automatically. Layer 2 (renderer): a denylist of sensitive-app name patterns (password managers, private-browsing windows, etc.) strips any content that slipped through before it reaches the ontology. Manual pause (Ctrl/Cmd+Alt+P) halts both tracks for 15 min, 1 h, or the rest of the day.
 
 ### Overall Module Relationships
 
