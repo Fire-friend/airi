@@ -35,6 +35,7 @@ import { array, boolean, check, maxLength, minLength, minValue, number, object, 
 
 import {
   electronScreenObservationCurrentStateCaptured,
+  electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationPause,
@@ -157,6 +158,7 @@ const taskSchema = object({
 })
 
 const upsertTaskRequestSchema = object({ task: taskSchema })
+const forgetTaskStateEvidenceRequestSchema = object({ taskId: optional(pipe(string(), trim(), minLength(1), maxLength(64))) })
 
 const taskObservationEvidenceSchema = object({
   kind: picklist(['semantic_progress', 'subgoal_progress', 'new_task_artifact', 'repeated_error', 'search_doc_loop', 'no_progress', 'semantic_blocker', 'off_task']),
@@ -261,6 +263,8 @@ export interface ScreenObserverService {
    * per-tick decide loop runs against active tasks from here.
    */
   upsertTask: (task: Task) => ScreenObservationRuntimeState
+  /** Clears task-companion evidence chains from persisted runtime state. */
+  forgetTaskStateEvidence: (request?: { taskId?: string }) => ScreenObservationRuntimeState
   /**
    * Presents a decided touch on the desktop. The touch DECISION is shared
    * pure logic (`decideScreenObservationTouch`); this only routes by level:
@@ -390,6 +394,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       latestSummaryAt,
       latestCurrentStateAt,
       tasks: Object.values(stored.tasks ?? {}),
+      taskWorkingStates: stored.taskWorkingStates ?? {},
       minecontextConfig: {
         baseUrl: stored.minecontextBaseUrl,
         screenshotCaptureEnabled: stored.screenshotCaptureEnabled ?? false,
@@ -472,6 +477,36 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     return publishStateIfChanged()
   }
 
+  const forgetTaskStateEvidence: ScreenObserverService['forgetTaskStateEvidence'] = (request = {}) => {
+    const stored = getConfig()
+    const states = stored.taskWorkingStates ?? {}
+    const clearState = (state: TaskWorkingState): TaskWorkingState => ({
+      ...state,
+      evidenceChain: [],
+      lastEvidenceAt: undefined,
+    })
+
+    if (request.taskId) {
+      const state = states[request.taskId]
+      if (!state)
+        return publishStateIfChanged()
+      persist({
+        taskWorkingStates: {
+          ...states,
+          [request.taskId]: clearState(state),
+        },
+      })
+      return publishStateIfChanged()
+    }
+
+    persist({
+      taskWorkingStates: Object.fromEntries(
+        Object.entries(states).map(([taskId, state]) => [taskId, clearState(state)]),
+      ),
+    })
+    return publishStateIfChanged()
+  }
+
   async function captureWindowSummary(now: Date): Promise<ScreenObserverSummary | undefined> {
     const { settings, privacyState } = lastBroadcastState
     const longMemoryPollMs = getConfig().longMemoryPollIntervalMs ?? DEFAULT_LONG_MEMORY_POLL_MS
@@ -551,6 +586,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
             const frame = buildObservationFrame(summary, activeTask, now)
             if (frame) {
               const signal = runTaskCompanion(frame, activeTask, now)
+              publishStateIfChanged()
               decideCompanionTouch(signal, activeTask, summary.id, now)
             }
           }
@@ -654,8 +690,10 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
         : undefined
       if (activeTask && activeTask.status === 'active') {
         const frame = buildCurrentStateFrame(currentState, activeTask, now)
-        if (frame)
+        if (frame) {
           runTaskCompanion(frame, activeTask, now)
+          publishStateIfChanged()
+        }
       }
     }
     catch (error) {
@@ -1041,6 +1079,8 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     defineInvokeHandler(context, electronScreenObservationPause, request => pause(parseIpcPayload(pauseRequestSchema, request, 'screen observation pause')))
     defineInvokeHandler(context, electronScreenObservationResume, () => resume())
     defineInvokeHandler(context, electronScreenObservationUpsertTask, request => upsertTask(parseIpcPayload(upsertTaskRequestSchema, request, 'screen observation task').task))
+    defineInvokeHandler(context, electronScreenObservationForgetTaskStateEvidence, request =>
+      forgetTaskStateEvidence(parseIpcPayload(forgetTaskStateEvidenceRequestSchema, request ?? {}, 'screen observation task-state forget')))
   }
 
   const dispose: ScreenObserverService['dispose'] = () => {
@@ -1079,6 +1119,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     resume,
     updateSettings,
     upsertTask,
+    forgetTaskStateEvidence,
     deliverTouch,
     getTouchInteraction: (taskId) => {
       const entry = ledgerEntryFor(taskId)

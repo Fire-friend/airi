@@ -4,6 +4,7 @@ import type {
   ScreenObserverPrivacyState,
   ScreenObserverSummary,
   Task,
+  TaskWorkingState,
   TouchEventPayload,
 } from '@proj-airi/server-sdk-shared'
 
@@ -66,6 +67,10 @@ export interface MineContextConfig {
   currentStatePollIntervalMs?: number
 }
 
+export interface ForgetTaskStateEvidenceRequest {
+  taskId?: string
+}
+
 /**
  * Live state of the Electron-main screen observation runtime.
  *
@@ -93,6 +98,8 @@ export interface ScreenObservationRuntimeState {
   latestCurrentStateAt?: string
   /** Tasks registered with the desktop runtime; the main-process decide loop runs against these. */
   tasks: Task[]
+  /** Per-task companion state produced by C1/C2; evidence remains task-local and provisional. */
+  taskWorkingStates: Record<string, TaskWorkingState>
   /** MineContext connection and polling config; the renderer reads this to populate the settings UI. */
   minecontextConfig: MineContextConfig
 }
@@ -108,6 +115,8 @@ export const electronScreenObservationResume = defineInvokeEventa<ScreenObservat
  * touches against it on each capture tick.
  */
 export const electronScreenObservationUpsertTask = defineInvokeEventa<ScreenObservationRuntimeState, { task: Task }>('eventa:invoke:electron:screen-observation:upsert-task')
+/** Clears task-companion evidence without deleting the task or promoting it into personality memory. */
+export const electronScreenObservationForgetTaskStateEvidence = defineInvokeEventa<ScreenObservationRuntimeState, ForgetTaskStateEvidenceRequest>('eventa:invoke:electron:screen-observation:forget-task-state-evidence')
 
 export const electronScreenObservationStateChanged = defineEventa<ScreenObservationRuntimeState>('eventa:event:electron:screen-observation:state-changed')
 export const electronScreenObservationSummaryCaptured = defineEventa<{ summary: ScreenObserverSummary }>('eventa:event:electron:screen-observation:summary-captured')

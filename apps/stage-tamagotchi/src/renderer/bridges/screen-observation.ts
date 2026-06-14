@@ -103,7 +103,8 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
 
   function applyRuntimeState(state: ScreenObservationRuntimeState) {
     lastKnownRemoteKey = observationSettingsKey(state.settings)
-    store.applyRuntimeState(state)
+    for (const contextUpdate of store.applyRuntimeState(state))
+      contextPublisher.sendContextUpdate(contextUpdate)
   }
 
   function currentLocalSettings(): ScreenObservationSettings {

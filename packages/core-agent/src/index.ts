@@ -45,6 +45,7 @@ export type {
   ResponseCategory,
 } from './runtime/response-categoriser'
 export { mergeLoadedSessionMessages } from './session/merge-loaded-session-messages'
+export { estimateTokens, fitToTokenBudget } from './utils/token-juice'
 export type {
   ChatAssistantMessage,
   ChatHistoryItem,

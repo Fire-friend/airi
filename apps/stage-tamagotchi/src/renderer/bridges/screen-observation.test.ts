@@ -1,4 +1,4 @@
-import type { ScreenObservationSettings, ScreenObserverSummary, Task, TouchEventPayload } from '@proj-airi/server-sdk-shared'
+import type { ScreenObservationSettings, ScreenObserverSummary, Task, TaskWorkingState, TouchEventPayload } from '@proj-airi/server-sdk-shared'
 import type { ScreenObservationContextUpdate } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 
 import type { ScreenObservationRuntimeState } from '../../shared/eventa'
@@ -32,6 +32,8 @@ function runtimeState(overrides: Partial<ScreenObservationRuntimeState> = {}): S
     observationSourceAvailable: true,
     tasks: [],
     ...overrides,
+    taskWorkingStates: overrides.taskWorkingStates ?? {},
+    minecontextConfig: overrides.minecontextConfig ?? {},
   }
 }
 
@@ -82,6 +84,22 @@ function touchFixture(id: string): TouchEventPayload {
     message: { remainingWork: 'two sections left', isOffTrack: false },
     actions: ['ack', 'details', 'mute_task'],
     policyApplied: [],
+  }
+}
+
+function taskWorkingStateFixture(taskId: string): TaskWorkingState {
+  return {
+    taskId,
+    state: 'stuck',
+    progressScore: 0.2,
+    stuckScore: 3.7,
+    stuckStartedAt: '2026-06-11T11:50:00.000Z',
+    evidenceChain: [{
+      kind: 'repeated_error',
+      description: 'TypeError: heap out of memory while building the quarterly report chart.',
+      fingerprint: 'terminal:error:heap-out-of-memory',
+      capturedAt: '2026-06-11T11:59:30.000Z',
+    }],
   }
 }
 
@@ -214,6 +232,8 @@ describe('initializeScreenObservationBridge', () => {
     context.emit(electronScreenObservationStateChanged, runtimeState({
       settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
       privacyState: 'observing',
+      tasks: [taskFixture('task-1')],
+      taskWorkingStates: { 'task-1': taskWorkingStateFixture('task-1') },
     }))
     context.emit(electronScreenObservationCurrentStateCaptured, {
       capturedAt: '2026-06-11T12:00:00.000Z',
@@ -230,9 +250,12 @@ describe('initializeScreenObservationBridge', () => {
       expect(store.longMemoryCandidates).toHaveLength(1)
       expect(store.latestTouches.map(entry => entry.id)).toEqual(['t-1'])
       expect(published.map(update => update.contextId)).toEqual([
+        'screen-observation:task-state:task-1',
         'screen-observation:current-state',
         'screen-observation:long-memory-candidates',
       ])
+      expect(published[0]!.text).toContain('Current Task State')
+      expect(published[0]!.text).toContain('heap out of memory')
     })
 
     dispose()

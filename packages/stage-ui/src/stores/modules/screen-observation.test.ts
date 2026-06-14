@@ -1,9 +1,10 @@
-import type { ScreenObserverSummary, TouchEventPayload } from '@proj-airi/server-sdk-shared'
+import type { ScreenObserverSummary, Task, TaskWorkingState, TouchEventPayload } from '@proj-airi/server-sdk-shared'
 
+import { estimateTokens } from '@proj-airi/core-agent'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { privacyStateLabelKey, provisionalPrivacyState, useScreenObservationStore } from './screen-observation'
+import { LONG_MEMORY_CONTEXT_BUDGET_TOKENS, privacyStateLabelKey, provisionalPrivacyState, TASK_STATE_CONTEXT_BUDGET_TOKENS, useScreenObservationStore } from './screen-observation'
 
 const now = new Date('2026-06-11T12:00:00.000Z')
 
@@ -85,6 +86,45 @@ describe('useScreenObservationStore appliers', () => {
     }
   }
 
+  function taskFixture(id = 'task-1'): Task {
+    return {
+      id,
+      userId: 'user-1',
+      title: 'Write quarterly report',
+      status: 'active',
+      priority: 'normal',
+      goal: 'Write quarterly report with the final chart',
+      schedule: { timezone: 'UTC', dailySummaryAtLocalTime: '18:00' },
+      observation: {
+        enabled: true,
+        mode: 'whitelist',
+        allowedApps: ['Obsidian'],
+        privacyState: 'observing',
+        isEffectivelyObserving: true,
+      },
+      touchPolicy: { level: 'L1', firstTaskFirstProgressUsesL2: true, dailySummaryEnabled: true },
+      createdAt: '2026-06-11T10:00:00.000Z',
+      updatedAt: '2026-06-11T10:00:00.000Z',
+    }
+  }
+
+  function taskWorkingStateFixture(overrides: Partial<TaskWorkingState> = {}): TaskWorkingState {
+    return {
+      taskId: 'task-1',
+      state: 'stuck',
+      progressScore: 0.2,
+      stuckScore: 3.8,
+      stuckStartedAt: '2026-06-11T11:50:00.000Z',
+      evidenceChain: [{
+        kind: 'repeated_error',
+        description: `TypeError: heap out of memory while building chart\n${'Worker crashed\n'.repeat(200)}Supervisor giving up`,
+        fingerprint: 'terminal:error:heap-out-of-memory',
+        capturedAt: '2026-06-11T11:59:30.000Z',
+      }],
+      ...overrides,
+    }
+  }
+
   it('applyRuntimeState lets the runtime win over renderer-persisted settings', () => {
     const store = useScreenObservationStore()
     store.enabled = true
@@ -130,11 +170,12 @@ describe('useScreenObservationStore appliers', () => {
   it('builds short-lived current-state context without adding long-memory evidence', () => {
     const store = useScreenObservationStore()
     store.allowedApps = ['obsidian']
+    const longWindowTitle = `Quarterly report ${'chart '.repeat(200)}`
 
     const contextUpdate = store.applyCurrentState({
       capturedAt: '2026-06-11T12:00:00.000Z',
       privacyState: 'observing',
-      focusedApp: { appName: 'Obsidian', windowTitle: 'Quarterly report' },
+      focusedApp: { appName: 'Obsidian', windowTitle: longWindowTitle },
     })
 
     expect(contextUpdate).toMatchObject({
@@ -143,8 +184,59 @@ describe('useScreenObservationStore appliers', () => {
       metadata: { lane: 'current-state', retention: 'ephemeral', longMemory: false },
     })
     expect(contextUpdate?.text).toContain('short-lived')
+    expect(contextUpdate?.text).toContain(longWindowTitle)
+    expect(contextUpdate?.metadata).not.toHaveProperty('tokenJuice')
     expect(store.latestCurrentState?.focusedApp?.appName).toBe('Obsidian')
     expect(store.longMemoryCandidates).toHaveLength(0)
+  })
+
+  it('builds budgeted task-state context without dropping task and stuck evidence', () => {
+    const store = useScreenObservationStore()
+
+    const updates = store.applyRuntimeState({
+      settings: { enabled: true, mode: 'whitelist', allowedApps: ['obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      privacyState: 'observing',
+      tasks: [taskFixture()],
+      taskWorkingStates: { 'task-1': taskWorkingStateFixture() },
+    })
+
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).toMatchObject({
+      contextId: 'screen-observation:task-state:task-1',
+      strategy: 'replace-self',
+      metadata: {
+        lane: 'task-state',
+        retention: 'ephemeral-task-state',
+        tokenJuice: true,
+        tokenBudget: TASK_STATE_CONTEXT_BUDGET_TOKENS,
+        longMemory: false,
+        personality: false,
+        forgettable: true,
+      },
+    })
+    expect(estimateTokens(updates[0]!.text)).toBeLessThanOrEqual(TASK_STATE_CONTEXT_BUDGET_TOKENS)
+    expect(updates[0]!.text).toContain('Write quarterly report')
+    expect(updates[0]!.text).toContain('State: stuck')
+    expect(updates[0]!.text).toContain('heap out of memory')
+  })
+
+  it('forgets task-state evidence and publishes a cleared task-state context', () => {
+    const store = useScreenObservationStore()
+    store.applyRuntimeState({
+      settings: { enabled: true, mode: 'whitelist', allowedApps: ['obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' },
+      privacyState: 'observing',
+      tasks: [taskFixture()],
+      taskWorkingStates: { 'task-1': taskWorkingStateFixture() },
+    })
+
+    const updates = store.forgetTaskStateEvidence('task-1')
+
+    expect(store.taskWorkingStates['task-1']?.evidenceChain).toEqual([])
+    expect(updates).toHaveLength(1)
+    expect(updates[0]!.contextId).toBe('screen-observation:task-state:task-1')
+    expect(updates[0]!.metadata).toMatchObject({ evidenceCount: 0, forgettable: true })
+    expect(updates[0]!.text).toContain('evidence was cleared')
+    expect(updates[0]!.text).not.toContain('heap out of memory')
   })
 
   it('does not publish current-state for a non-whitelisted focused app', () => {
@@ -200,8 +292,14 @@ describe('useScreenObservationStore appliers', () => {
     expect(first?.contextUpdate).toMatchObject({
       contextId: 'screen-observation:long-memory-candidates',
       strategy: 'replace-self',
-      metadata: { lane: 'long-memory-candidate', privacyFiltered: true },
+      metadata: {
+        lane: 'long-memory-candidate',
+        privacyFiltered: true,
+        tokenJuice: true,
+        tokenBudget: LONG_MEMORY_CONTEXT_BUDGET_TOKENS,
+      },
     })
+    expect(estimateTokens(first!.contextUpdate!.text)).toBeLessThanOrEqual(LONG_MEMORY_CONTEXT_BUDGET_TOKENS)
     expect(duplicate?.duplicate).toBe(true)
     expect(duplicate?.contextUpdate).toBeUndefined()
     expect(store.longMemoryCandidates).toHaveLength(1)

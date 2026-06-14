@@ -6,10 +6,12 @@ import type {
   ScreenObserverPrivacyState,
   ScreenObserverSummary,
   Task,
+  TaskWorkingState,
   TouchEventPayload,
   TouchLevel,
 } from '@proj-airi/server-sdk-shared'
 
+import { estimateTokens, fitToTokenBudget } from '@proj-airi/core-agent'
 import { ContextUpdateStrategy } from '@proj-airi/server-sdk'
 import { DEFAULT_DAILY_SUMMARY_LOCAL_TIME, DEFAULT_TOUCH_LEVEL } from '@proj-airi/server-sdk-shared'
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
@@ -96,6 +98,8 @@ export interface RuntimeObservationState {
   observationSourceAvailable?: boolean
   /** Tasks registered with the runtime's decide loop; omitted payloads keep the current list. */
   tasks?: Task[]
+  /** Per-task companion state from the runtime; evidence is task-local and provisional. */
+  taskWorkingStates?: Record<string, TaskWorkingState>
   /** MineContext connection and polling configuration from the desktop runtime. */
   minecontextConfig?: RuntimeMineContextConfig
 }
@@ -160,6 +164,8 @@ const STABLE_FACET_MIN_EVIDENCE = 3
 const STABLE_FACET_MIN_DAYS = 2
 const STABLE_FACET_MIN_DECAYED_EVIDENCE = 2.5
 const FACET_HALF_LIFE_DAYS = 14
+export const LONG_MEMORY_CONTEXT_BUDGET_TOKENS = 1_500
+export const TASK_STATE_CONTEXT_BUDGET_TOKENS = 1_200
 
 function defaultPrivacyDenylist(): ScreenObservationPrivacyDenylist {
   return {
@@ -336,22 +342,26 @@ function buildLongMemoryContextUpdate(
   const provisionalText = provisionalFacets.length > 0
     ? provisionalFacets.map(facet => `${facet.label} (evidence=${facet.evidenceCount}/${STABLE_FACET_MIN_EVIDENCE}, days=${facet.distinctDayCount}/${STABLE_FACET_MIN_DAYS})`).join('; ')
     : 'none'
+  const text = fitToTokenBudget([
+    `Long Memory Candidate (privacy-filtered): ${candidate.summary}`,
+    `Apps: ${candidate.apps.join(', ')}`,
+    `Window: ${candidate.windowStartedAt} to ${candidate.windowEndedAt}`,
+    `Stable facets: ${stableText}`,
+    `Provisional facets: ${provisionalText}`,
+    'Only stable facets are durable user/device habits; provisional facets are hypotheses and must not be treated as personality.',
+  ].join('\n'), LONG_MEMORY_CONTEXT_BUDGET_TOKENS)
 
   return {
     strategy: ContextUpdateStrategy.ReplaceSelf,
     contextId: 'screen-observation:long-memory-candidates',
-    text: [
-      `Long Memory Candidate (privacy-filtered): ${candidate.summary}`,
-      `Apps: ${candidate.apps.join(', ')}`,
-      `Window: ${candidate.windowStartedAt} to ${candidate.windowEndedAt}`,
-      `Stable facets: ${stableText}`,
-      `Provisional facets: ${provisionalText}`,
-      'Only stable facets are durable user/device habits; provisional facets are hypotheses and must not be treated as personality.',
-    ].join('\n'),
+    text,
     metadata: {
       module: 'screen-observation',
       lane: 'long-memory-candidate',
       retention: 'local-memory-queue',
+      tokenJuice: true,
+      tokenBudget: LONG_MEMORY_CONTEXT_BUDGET_TOKENS,
+      estimatedTokens: estimateTokens(text),
       candidateHash: candidate.hash,
       summaryId: candidate.summaryId,
       capturedAt: candidate.capturedAt,
@@ -362,6 +372,84 @@ function buildLongMemoryContextUpdate(
       privacyFiltered: true,
     },
   }
+}
+
+function taskStateEvidenceLine(evidence: TaskWorkingState['evidenceChain'][number]): string {
+  const fingerprint = evidence.fingerprint ? ` [${evidence.fingerprint}]` : ''
+  const capturedAt = evidence.capturedAt ? ` @ ${evidence.capturedAt}` : ''
+  return `- ${evidence.kind}${fingerprint}${capturedAt}: ${evidence.description}`
+}
+
+function activeTaskStateEntries(
+  tasks: readonly Task[],
+  taskWorkingStates: Record<string, TaskWorkingState>,
+): Array<{ task: Task, state: TaskWorkingState }> {
+  return Object.values(taskWorkingStates)
+    .map((state) => {
+      const task = tasks.find(candidate => candidate.id === state.taskId)
+      return task && task.status === 'active' ? { task, state } : undefined
+    })
+    .filter((entry): entry is { task: Task, state: TaskWorkingState } => Boolean(entry))
+}
+
+function taskStateContextKey(tasks: readonly Task[], taskWorkingStates: Record<string, TaskWorkingState>): string {
+  return JSON.stringify(activeTaskStateEntries(tasks, taskWorkingStates).map(({ task, state }) => ({
+    taskId: task.id,
+    title: task.title,
+    goal: task.goal,
+    state,
+  })))
+}
+
+function buildTaskStateContextUpdate(task: Task, state: TaskWorkingState): ScreenObservationContextUpdate {
+  const evidenceLines = state.evidenceChain.length > 0
+    ? state.evidenceChain.slice(-8).map(taskStateEvidenceLine).join('\n')
+    : 'none; evidence was cleared or no task-local evidence has accumulated yet'
+  const text = fitToTokenBudget([
+    `Current Task State (privacy-filtered, provisional, do not store as personality): ${task.title}`,
+    `Task: ${task.title}`,
+    `Goal: ${task.goal}`,
+    `State: ${state.state}`,
+    `Scores: progress=${state.progressScore}, stuck=${state.stuckScore}`,
+    `Last progress: ${state.lastProgressAt ?? 'unknown'}`,
+    `Stuck started: ${state.stuckStartedAt ?? 'not currently stuck'}`,
+    `Episode: ${state.episodeId ?? 'none'}`,
+    'Recent task-local evidence:',
+    evidenceLines,
+    'Use this only to understand the current task and whether the user is stuck. Do not promote this evidence into durable personality or habit memory unless the separate stable facet pipeline promotes it.',
+  ].join('\n'), TASK_STATE_CONTEXT_BUDGET_TOKENS)
+
+  return {
+    strategy: ContextUpdateStrategy.ReplaceSelf,
+    contextId: `screen-observation:task-state:${task.id}`,
+    text,
+    metadata: {
+      module: 'screen-observation',
+      lane: 'task-state',
+      retention: 'ephemeral-task-state',
+      taskId: task.id,
+      taskTitle: task.title,
+      state: state.state,
+      progressScore: state.progressScore,
+      stuckScore: state.stuckScore,
+      evidenceCount: state.evidenceChain.length,
+      tokenJuice: true,
+      tokenBudget: TASK_STATE_CONTEXT_BUDGET_TOKENS,
+      estimatedTokens: estimateTokens(text),
+      privacyFiltered: true,
+      longMemory: false,
+      personality: false,
+      forgettable: true,
+    },
+  }
+}
+
+function buildTaskStateContextUpdates(
+  tasks: readonly Task[],
+  taskWorkingStates: Record<string, TaskWorkingState>,
+): ScreenObservationContextUpdate[] {
+  return activeTaskStateEntries(tasks, taskWorkingStates)
+    .map(({ task, state }) => buildTaskStateContextUpdate(task, state))
 }
 
 export const useScreenObservationStore = defineStore('screen-observation', () => {
@@ -397,6 +485,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
   const snapshotPrivacyState = ref<ScreenObserverPrivacyState>()
   const observationSourceAvailable = ref<boolean>()
   const latestCurrentState = ref<ScreenObservationCurrentState>()
+  const taskWorkingStates = ref<Record<string, TaskWorkingState>>({})
 
   const privacyState = computed<ScreenObserverPrivacyState>(() =>
     snapshotPrivacyState.value ?? provisionalPrivacyState({
@@ -436,19 +525,25 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
    * component that actually gates capture, so the UI must never claim a
    * different observation state than the poller is in.
    */
-  function applyRuntimeState(state: RuntimeObservationState) {
+  function applyRuntimeState(state: RuntimeObservationState): ScreenObservationContextUpdate[] {
+    const previousTaskStateKey = taskStateContextKey(tasks.value, taskWorkingStates.value)
     applySettings(state.settings)
     pauseUntil.value = state.pauseUntil
     snapshotPrivacyState.value = state.privacyState
     observationSourceAvailable.value = state.observationSourceAvailable
     if (state.tasks)
       tasks.value = state.tasks
+    if (state.taskWorkingStates)
+      taskWorkingStates.value = state.taskWorkingStates
     if (state.minecontextConfig) {
       minecontextBaseUrl.value = state.minecontextConfig.baseUrl ?? ''
       screenshotCaptureEnabled.value = state.minecontextConfig.screenshotCaptureEnabled ?? false
       longMemoryPollIntervalMs.value = state.minecontextConfig.longMemoryPollIntervalMs ?? 30_000
       currentStatePollIntervalMs.value = state.minecontextConfig.currentStatePollIntervalMs ?? 15_000
     }
+    return taskStateContextKey(tasks.value, taskWorkingStates.value) === previousTaskStateKey
+      ? []
+      : buildTaskStateContextUpdates(tasks.value, taskWorkingStates.value)
   }
 
   /** Inserts a captured summary at the head of the log, replacing any redelivered duplicate by id. */
@@ -594,6 +689,22 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     habitFacets.value = []
   }
 
+  function forgetTaskStateEvidence(taskId?: string): ScreenObservationContextUpdate[] {
+    const clearState = (state: TaskWorkingState): TaskWorkingState => ({
+      ...state,
+      evidenceChain: [],
+      lastEvidenceAt: undefined,
+    })
+
+    taskWorkingStates.value = Object.fromEntries(
+      Object.entries(taskWorkingStates.value).map(([id, state]) => [
+        id,
+        taskId && id !== taskId ? state : clearState(state),
+      ]),
+    )
+    return buildTaskStateContextUpdates(tasks.value, taskWorkingStates.value)
+  }
+
   function resetPrivacyDenylist() {
     privacyDenylist.value = defaultPrivacyDenylist()
   }
@@ -622,6 +733,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     snapshotPrivacyState.value = undefined
     observationSourceAvailable.value = undefined
     latestCurrentState.value = undefined
+    taskWorkingStates.value = {}
   }
 
   return {
@@ -648,6 +760,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     latestTouches,
     latestDailySummary,
     latestCurrentState,
+    taskWorkingStates,
     pauseUntil,
     privacyState,
     isEffectivelyObserving,
@@ -662,6 +775,7 @@ export const useScreenObservationStore = defineStore('screen-observation', () =>
     pinFacet,
     forgetFacet,
     clearLongMemoryEvidence,
+    forgetTaskStateEvidence,
     resetPrivacyDenylist,
     resetState,
   }

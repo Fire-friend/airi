@@ -10,6 +10,7 @@ import { createScreenObservationTask, DEFAULT_TASK_COMPANION_THRESHOLDS } from '
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationPause,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -309,6 +310,50 @@ describe('screen observer end-to-end bridge', () => {
     // Second stuck tick in same episode: shouldNudge=false → no additional touch.
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
     expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(1)
+  })
+
+  it('forgets persisted task-state evidence without deleting the task state', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+    const forgetTaskStateEvidence = defineInvoke(context, electronScreenObservationForgetTaskStateEvidence)
+
+    getActivities.mockResolvedValue([
+      {
+        id: 'ctx-stuck',
+        title: 'error in code',
+        summary: 'cannot fix the error in code',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-stuck',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: 'Code', window: 'report.md' },
+          },
+        ],
+      },
+    ])
+
+    await updateSettings({ enabled: true, allowedApps: ['Code'] })
+    await upsertTask({ task: activeTask('task-forget') })
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+
+    expect(observer.getState().taskWorkingStates['task-forget']?.evidenceChain.length).toBeGreaterThan(0)
+
+    const cleared = await forgetTaskStateEvidence({ taskId: 'task-forget' })
+
+    expect(cleared.taskWorkingStates['task-forget']).toMatchObject({
+      taskId: 'task-forget',
+      evidenceChain: [],
+    })
+    expect(observer.getState().taskWorkingStates['task-forget']?.evidenceChain).toEqual([])
   })
 
   it('off-task apps do not trigger companion inference', async () => {
