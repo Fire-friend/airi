@@ -229,6 +229,110 @@ This means that **アイリ is capable of running on modern browsers and devices
 >
 > **If you are interested, why not introduce yourself here? [Would like to join part of us to build AIRI?](https://github.com/moeru-ai/airi/discussions/33)**
 
+## System Architecture
+
+### Module Overview
+
+AIRI is a **client-centric monorepo**. The agent runtime, context memory, and LLM inference all run in the client (renderer process / browser), not on a remote server.
+
+| Layer | Package / App | Role |
+|---|---|---|
+| **Desktop app** | `apps/stage-tamagotchi` | Electron shell, main process, Electron-only services (screen observer, tray, audio, plugin host) |
+| **Web app** | `apps/stage-web` | Browser-based stage — same Vue + stage-ui stack, no Electron APIs |
+| **Mobile app** | `apps/stage-pocket` | Capacitor shell for iOS / Android |
+| **Shared client** | `packages/stage-ui` | Vue stores, composables, and components shared between all front-ends; also where the agent runtime lives |
+| **Agent runtime** | `packages/core-agent` | LLM orchestration, chat-orchestrator-runtime, context registry, response categoriser — runs entirely client-side |
+| **Local relay** | `packages/server-runtime` | WebSocket channel server (`ws://localhost:6121`), embedded in the desktop app; fans out `context:update` events to connected windows/clients |
+| **Client SDK** | `packages/server-sdk` | WebSocket `Client` for connecting `stage-ui` to `server-runtime` |
+| **Shared contracts** | `packages/server-sdk-shared` | Privacy states, task model, touch policy, observation types — the single source of truth for cross-boundary types |
+| **Cloud backend** | `apps/server` | Auth (Better Auth/OIDC), billing, chat-message sync, LLM/TTS gateway; separate from the agent, no dependency on `core-agent` |
+| **Providers** | `packages/stage-ui/src/stores/providers` | Chat (LLM), TTS, transcription providers wired through [xsai](https://github.com/moeru-ai/xsai) |
+| **UI primitives** | `packages/ui` | Headless reka-ui components (inputs, buttons, layout) |
+| **i18n** | `packages/i18n` | Centralized translations (en, zh-Hans, ja, …) |
+
+### Screen Observation — Data Flow
+
+This shows the end-to-end pipeline added to give AIRI passive awareness of your screen and device.
+
+```mermaid
+flowchart TD
+    MC["MineContext daemon\n(opencontext, localhost:1733)\nscreenshot capture every ~5s\nVLM activity summary every ~10min"]
+
+    subgraph MAIN["Electron main process (stage-tamagotchi)"]
+        SO["screen-observer/index.ts\nTwo polling timers"]
+        CS["current-state tick\n(polls raw_context every 15s)"]
+        LM["long-memory tick\n(polls activity_context every 30s)\nhealth-check on each tick"]
+        WL["allowedApps whitelist\n(silent drop if not listed)"]
+        IPC["Eventa IPC bridge\n(type-safe main ↔ renderer)"]
+    end
+
+    subgraph RENDERER["Renderer process — packages/stage-ui"]
+        BR["screen-observation bridge\nreceives IPC events"]
+        CU["applyCurrentState()\n→ contextId: screen-observation:current-state\nContextUpdateStrategy.ReplaceSelf"]
+        LMI["applySummary() / ingestLongMemorySummary()\nbuild LongMemoryCandidate"]
+        FH["updateHabitFacets()\nevidence + days + decay gate"]
+        SF["stable facet promoted\n→ contextId: screen-observation:long-memory-candidates"]
+        PF["provisional facet\n(accumulating, not yet in context)"]
+        CH["channel-server.ts\nsendContextUpdate()\nWS context:update → ws://localhost:6121"]
+    end
+
+    subgraph RELAY["packages/server-runtime (port 6121, embedded in desktop app)"]
+        SR["fanout relay\nbroadcasts to connected windows/clients"]
+    end
+
+    subgraph AGENT["packages/core-agent (client-side, in stage-ui/stores/chat)"]
+        CB["context-bridge.ts\ningests context:update\ninto context registry"]
+        CR["context registry\nsnapshot on next user turn"]
+        ORCH["chat-orchestrator-runtime\nappends context to LLM prompt"]
+        PROV["xsai provider\n(OpenAI / Anthropic / Ollama / …)"]
+    end
+
+    MC -->|REST GET /api/vector_search| CS
+    MC -->|REST GET /api/vector_search| LM
+    SO --> CS
+    SO --> LM
+    CS --> WL
+    LM --> WL
+    WL -->|filtered app contexts| IPC
+    IPC --> BR
+    BR --> CU
+    BR --> LMI
+    LMI --> FH
+    FH -->|evidenceCount≥3, distinctDays≥2, decayedEvidence≥2.5| SF
+    FH -->|below threshold| PF
+    CU --> CH
+    SF --> CH
+    CH --> SR
+    SR --> CB
+    CB --> CR
+    CR --> ORCH
+    ORCH --> PROV
+```
+
+**Privacy note**: the allowedApps whitelist runs at the main-process level — only apps you explicitly list pass through the IPC bridge. Fullscreen and meeting surfaces are suppressed automatically. Manual pause (Ctrl/Cmd+Alt+P) stops observation for 15 min / 1 h / rest of day.
+
+### Overall Module Relationships
+
+```mermaid
+graph LR
+    TG["stage-tamagotchi\n(Electron)"] --> SUI["stage-ui\n(shared stores + components)"]
+    SW["stage-web\n(browser)"] --> SUI
+    SP["stage-pocket\n(mobile)"] --> SUI
+    SUI --> CA["core-agent\n(LLM orchestration)"]
+    SUI --> SDK["server-sdk\n(WebSocket client)"]
+    SDK --> SR["server-runtime\n(local relay :6121)"]
+    CA --> XSAI["xsai\n(provider adapter)"]
+    XSAI --> P["chat / TTS /\ntranscription providers"]
+    SUI --> SSDK["server-sdk-shared\n(shared types)"]
+    CA --> SSDK
+    TG --> SR
+    TG --> SCR["screen-observer\n(MineContext client)"]
+    SCR --> SUI
+    AS["apps/server\n(cloud: auth / billing / chat-sync)"] -.->|optional connection| SDK
+```
+
+> For a deeper dive, see [docs/content/en/docs/manual/tamagotchi/minecontext.md](./docs/content/en/docs/manual/tamagotchi/minecontext.md) (MineContext setup and configuration).
+
 ## Current Progress & Roadmap
 
 Capable of
