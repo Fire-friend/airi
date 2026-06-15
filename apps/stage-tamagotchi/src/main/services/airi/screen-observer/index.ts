@@ -55,6 +55,7 @@ import {
   computePauseUntil,
   emptyLedgerEntry,
   formatTouchNotification,
+  isDeniedByPrivacyDenylist,
   isMeetingSurface,
   recordTouchPresented,
   shouldCaptureScreen,
@@ -835,12 +836,13 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   /**
    * Converts a long-memory summary into a `TaskObservationFrame` bound to `task`.
    *
-   * Returns `undefined` when none of the summary apps match the task's
-   * `allowedApps` whitelist — this signals off-task activity and the caller
-   * should skip companion inference for this tick.
+   * Returns `undefined` when:
+   * - No summary apps match the task's `allowedApps` whitelist (off-task activity), OR
+   * - All matched apps are denied by the privacy denylist / private-window filter.
    *
-   * Privacy guarantee: only called after `shouldCaptureScreen` has passed,
-   * so `privacyFiltered: true` is safe to set unconditionally here.
+   * Privacy guarantee: `privacyFiltered: true` is only set after BOTH the
+   * global `shouldCaptureScreen` gate AND the denylist / private-window check
+   * have passed. Denylist or private content never reaches `runTaskCompanion`.
    */
   function buildObservationFrame(summary: ScreenObserverSummary, task: Task, now: Date): TaskObservationFrame | undefined {
     const taskApps = new Set(task.observation.allowedApps.map(a => a.toLowerCase()))
@@ -851,7 +853,21 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     if (matchedApps.length === 0)
       return undefined
 
-    const topApp = matchedApps[0]!
+    // Privacy gate: reject denylist apps and private-window content BEFORE
+    // any inference. Must run here — the renderer-layer denylist filter is
+    // too late because `runTaskCompanion` writes to persisted task working state.
+    if (isDeniedByPrivacyDenylist({ summary: summary.summary }))
+      return undefined
+
+    const allowedApps = matchedApps.filter(app => !isDeniedByPrivacyDenylist({
+      appName: app.appName,
+      windowTitle: app.windowTitle,
+      summary: app.summary,
+    }))
+    if (allowedApps.length === 0)
+      return undefined
+
+    const topApp = allowedApps[0]!
     const windowFingerprint = topApp.windowTitle
       ? `${topApp.appName.toLowerCase()}:${topApp.windowTitle.toLowerCase()}`
       : topApp.appName.toLowerCase()
@@ -860,11 +876,11 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       taskId: task.id,
       capturedAt: now.toISOString(),
       summaryId: summary.id,
-      appNames: matchedApps.map(app => app.appName),
+      appNames: allowedApps.map(app => app.appName),
       windowFingerprint,
       // Summary text feeds the C1 keyword detectors inside scoreTaskProgress /
       // scoreTaskStuck — no need to pre-compute evidence here.
-      summary: matchedApps.map(app => app.summary).filter(Boolean).join(' '),
+      summary: allowedApps.map(app => app.summary).filter(Boolean).join(' '),
       confidence: summary.confidence,
       privacyFiltered: true,
     }
@@ -877,14 +893,23 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
    * is feeding window-fingerprint data to the repeated-fingerprint detector so
    * stuck evidence accumulates before the next long-memory tick.
    *
-   * Returns `undefined` when the focused app is absent or outside the task
-   * whitelist.
+   * Returns `undefined` when:
+   * - The focused app is absent,
+   * - The app is outside the task whitelist, OR
+   * - The app or window title is denied by the privacy denylist / private-window
+   *   filter. Denied content must not contribute to task evidence or working state.
    */
   function buildCurrentStateFrame(currentState: ScreenObserverCurrentState, task: Task, now: Date): TaskObservationFrame | undefined {
     if (!currentState.focusedApp)
       return undefined
 
     const { appName, windowTitle } = currentState.focusedApp
+
+    // Privacy gate: must run before whitelist check so a private-window
+    // version of an allowed app (e.g. incognito Chrome) is still rejected.
+    if (isDeniedByPrivacyDenylist({ appName, windowTitle }))
+      return undefined
+
     const taskApps = new Set(task.observation.allowedApps.map(a => a.toLowerCase()))
 
     if (taskApps.size > 0 && !taskApps.has(appName.toLowerCase()))

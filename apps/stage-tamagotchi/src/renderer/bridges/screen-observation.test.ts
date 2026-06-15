@@ -336,7 +336,14 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
     const app = createApp(Parent)
     app.mount(document.createElement('div'))
 
-    return { app, childResult, dispose: () => { app.unmount(); disposeRef() } }
+    return {
+      app,
+      childResult,
+      dispose: () => {
+        app.unmount()
+        disposeRef()
+      },
+    }
   }
 
   it('upsertTask invokes the main-process handler and applies the returned state to the store', async () => {

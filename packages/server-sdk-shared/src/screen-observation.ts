@@ -157,15 +157,15 @@ export interface DailySummaryPayload {
   touch?: TouchEventPayload
 }
 
-export type ScreenObservationI18nKey =
-  | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.blocked'
-  | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.ready'
-  | 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
-  | 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track'
-  | 'tamagotchi.screen_observation.daily_summary.observation.off_track'
-  | 'tamagotchi.screen_observation.daily_summary.observation.on_track'
-  | 'tamagotchi.screen_observation.daily_summary.tomorrow.blocked'
-  | 'tamagotchi.screen_observation.daily_summary.tomorrow.ready'
+export type ScreenObservationI18nKey
+  = | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.blocked'
+    | 'tamagotchi.screen_observation.daily_summary.progress.remaining_work.ready'
+    | 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
+    | 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track'
+    | 'tamagotchi.screen_observation.daily_summary.observation.off_track'
+    | 'tamagotchi.screen_observation.daily_summary.observation.on_track'
+    | 'tamagotchi.screen_observation.daily_summary.tomorrow.blocked'
+    | 'tamagotchi.screen_observation.daily_summary.tomorrow.ready'
 
 export type I18nTextParam = string | number | boolean | null | undefined
 
@@ -862,7 +862,7 @@ export function transitionTaskWorkingState(input: TaskCompanionScoringInput): Ta
   const stuck = scoreTaskStuck(input)
 
   let nextCompanionState: TaskCompanionState = 'idle'
-  let nextProgressScore = Math.min(thresholds.maxScore, previousState.progressScore * thresholds.idleScoreDecay + progress.score)
+  const nextProgressScore = Math.min(thresholds.maxScore, previousState.progressScore * thresholds.idleScoreDecay + progress.score)
   let nextStuckScore = Math.min(thresholds.maxScore, previousState.stuckScore * thresholds.idleScoreDecay + stuck.score)
   let lastProgressAt = previousState.lastProgressAt
   let stuckStartedAt = previousState.stuckStartedAt
@@ -1135,14 +1135,16 @@ function normalizeDailySummaryProgress(progress: TaskProgressNarrative | undefin
       ),
     ),
     etaAt: progress?.etaAt,
-    pace: progress?.pace ? normalizeDailySummarySentence(
-      progress.pace,
-      dailySummaryI18nText(
-        isOffTrack
-          ? 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
-          : 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track',
-      ),
-    ) : undefined,
+    pace: progress?.pace
+      ? normalizeDailySummarySentence(
+          progress.pace,
+          dailySummaryI18nText(
+            isOffTrack
+              ? 'tamagotchi.screen_observation.daily_summary.progress.pace.off_track'
+              : 'tamagotchi.screen_observation.daily_summary.progress.pace.on_track',
+          ),
+        )
+      : undefined,
     isOffTrack,
   }
 }

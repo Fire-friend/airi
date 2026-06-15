@@ -393,6 +393,112 @@ describe('screen observer end-to-end bridge', () => {
     expect(blockedTouches).toHaveLength(0)
   })
 
+  it('denylist app (1Password) produces no task evidence even when task-whitelisted', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    // 1Password is on the default denylist: even if the task explicitly whitelists
+    // it as an allowed app, the privacy gate must block frames before inference runs.
+    getActivities.mockResolvedValue([
+      {
+        id: 'ctx-password',
+        title: '1password vault',
+        summary: 'reviewing saved credentials',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-pw',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: '1Password', window: 'Vault' },
+          },
+        ],
+      },
+    ])
+
+    await updateSettings({ enabled: true, allowedApps: ['1Password'] })
+    const task = createScreenObservationTask({
+      id: 'task-denylist',
+      userId: 'user-1',
+      title: 'Review credentials',
+      status: 'active',
+      observation: { allowedApps: ['1Password'] },
+      progressNarrative: { remainingWork: 'check all entries', isOffTrack: false },
+    }, new Date('2026-06-11T10:00:00.000Z'))
+    await upsertTask({ task })
+
+    for (let i = 0; i < 5; i++)
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+
+    // No evidence must accumulate: the privacy gate must have returned undefined
+    // from buildObservationFrame, skipping runTaskCompanion for every tick.
+    const taskState = observer.getState().taskWorkingStates['task-denylist']
+    expect(taskState?.evidenceChain ?? []).toHaveLength(0)
+  })
+
+  it('private-window content (incognito Chrome) produces no task evidence', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    // Chrome is on the task whitelist, but the user is in an incognito window.
+    // The denylist matches window titles containing 'incognito' and must prevent
+    // the frame from being built so no task evidence or working state is written.
+    getActivities.mockResolvedValue([
+      {
+        id: 'ctx-incognito',
+        title: 'incognito browsing',
+        summary: 'user is browsing privately',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-incognito',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: 'Chrome', window: 'Incognito Mode' },
+          },
+        ],
+      },
+    ])
+
+    await updateSettings({ enabled: true, allowedApps: ['Chrome'] })
+    const task = createScreenObservationTask({
+      id: 'task-incognito',
+      userId: 'user-1',
+      title: 'Browse docs',
+      status: 'active',
+      observation: { allowedApps: ['Chrome'] },
+      progressNarrative: { remainingWork: 'read through pages', isOffTrack: false },
+    }, new Date('2026-06-11T10:00:00.000Z'))
+    await upsertTask({ task })
+
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    // Advance well past the stuck threshold; if frames were built from private-window
+    // content, a task_blocked touch would eventually fire. It must not.
+    for (let i = 0; i < 5; i++)
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS)
+
+    const taskState = observer.getState().taskWorkingStates['task-incognito']
+    expect(taskState?.evidenceChain ?? []).toHaveLength(0)
+    expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(0)
+  })
+
   it('falls back to an L2 notice and still stamps the throttle clock when system notifications are unsupported', async () => {
     const { Notification } = await import('electron') as unknown as { Notification: { supported: boolean } }
     Notification.supported = false

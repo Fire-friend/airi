@@ -171,7 +171,7 @@ describe('truncateLongUrls', () => {
 
 describe('dedupRepeatedLines', () => {
   it('collapses a long run of identical lines', () => {
-    const crash = Array.from({ length: 100 }, () => 'ENOENT: no such file or directory').join('\n')
+    const crash = Array.from({ length: 100 }).fill('ENOENT: no such file or directory').join('\n')
     const result = dedupRepeatedLines(crash)
     const lines = result.split('\n')
     expect(lines).toHaveLength(3) // 2 kept + 1 count note
@@ -202,7 +202,7 @@ describe('dedupRepeatedLines', () => {
   it('preserves error and key content in a crash-loop log', () => {
     const lines = [
       'Starting worker process',
-      ...Array.from({ length: 50 }, () => 'Worker crashed: OOM'),
+      ...Array.from({ length: 50 }).fill('Worker crashed: OOM'),
       'Supervisor giving up after 50 attempts',
     ]
     const result = dedupRepeatedLines(lines.join('\n'))
@@ -338,8 +338,7 @@ describe('squeezeText', () => {
 
   it('reduces token count on a long log blob', () => {
     const longLog = Array.from({ length: 200 }, (_, i) =>
-      `[2024-01-01T00:${String(i % 60).padStart(2, '0')}:00Z] [INFO] [pid:${1000 + i}] processed request ${i}`,
-    ).join('\n')
+      `[2024-01-01T00:${String(i % 60).padStart(2, '0')}:00Z] [INFO] [pid:${1000 + i}] processed request ${i}`).join('\n')
 
     const before = estimateTokens(longLog)
     const result = squeezeText(longLog)
@@ -361,8 +360,7 @@ describe('fitToTokenBudget', () => {
 
   it('compresses long log output to fit a tight budget', () => {
     const log = Array.from({ length: 500 }, (_, i) =>
-      `[2024-01-01T00:00:${String(i % 60).padStart(2, '0')}Z] [DEBUG] [pid:${i}] cache miss for key "user:${i}"`,
-    ).join('\n')
+      `[2024-01-01T00:00:${String(i % 60).padStart(2, '0')}Z] [DEBUG] [pid:${i}] cache miss for key "user:${i}"`).join('\n')
 
     const budget = 200
     const result = fitToTokenBudget(log, budget)
@@ -372,9 +370,7 @@ describe('fitToTokenBudget', () => {
   it('preserves key content within budget on a crash-loop log', () => {
     const lines = [
       '[2024-01-01T00:00:00Z] [ERROR] Worker failed: OutOfMemoryError',
-      ...Array.from({ length: 100 }, () =>
-        '[2024-01-01T00:00:01Z] [ERROR] Worker crashed: OOM — restarting',
-      ),
+      ...Array.from({ length: 100 }).fill('[2024-01-01T00:00:01Z] [ERROR] Worker crashed: OOM — restarting'),
       '[2024-01-01T00:01:00Z] [FATAL] Supervisor giving up',
     ]
     const result = fitToTokenBudget(lines.join('\n'), 150)

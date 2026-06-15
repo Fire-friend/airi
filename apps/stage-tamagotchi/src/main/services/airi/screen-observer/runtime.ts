@@ -95,6 +95,75 @@ const MEETING_WINDOW_TITLE_KEYWORDS = [
   'meet.google.com',
 ]
 
+/**
+ * Apps that must never contribute to task evidence or working state.
+ * Matched case-insensitively as substrings of the app name.
+ * Keep in sync with `defaultPrivacyDenylist().appPatterns` in stage-ui.
+ */
+const DENIED_APP_PATTERNS = [
+  '1password',
+  'bitwarden',
+  'keychain',
+  'lastpass',
+  'password',
+]
+
+/**
+ * Window title / summary substrings that indicate private-browsing or
+ * secret-handling surfaces. Matched case-insensitively.
+ */
+const DENIED_TITLE_PATTERNS = [
+  'incognito',
+  'inprivate',
+  'private browsing',
+  'private window',
+  'token',
+  'secret',
+  'password',
+]
+
+/**
+ * Domain substrings that indicate sensitive web content (banking, auth, etc.).
+ * Applied to window titles and summary text; matched case-insensitively.
+ */
+const DENIED_DOMAIN_PATTERNS = [
+  'accounts.google.com',
+  'bank',
+  'github.com/settings/tokens',
+  'mail.google.com',
+  'paypal.com',
+]
+
+function matchesDenyPattern(value: string | undefined, patterns: readonly string[]): boolean {
+  const normalized = (value ?? '').trim().toLowerCase()
+  if (!normalized)
+    return false
+  return patterns.some(pattern => normalized.includes(pattern.toLowerCase()))
+}
+
+/**
+ * Returns `true` when the given app name, window title, or summary text
+ * matches any default privacy-denylist pattern.
+ *
+ * Content matching this check must NOT contribute to task evidence or
+ * working state — callers should return `undefined` from their frame
+ * builders and skip `runTaskCompanion` for this tick.
+ */
+export function isDeniedByPrivacyDenylist(input: {
+  appName?: string
+  windowTitle?: string
+  summary?: string
+}): boolean {
+  if (matchesDenyPattern(input.appName, DENIED_APP_PATTERNS))
+    return true
+  const titleAndSummary = [input.windowTitle, input.summary].filter(Boolean).join(' ')
+  if (matchesDenyPattern(titleAndSummary, DENIED_TITLE_PATTERNS))
+    return true
+  if (matchesDenyPattern(titleAndSummary, DENIED_DOMAIN_PATTERNS))
+    return true
+  return false
+}
+
 /** Decides whether the currently focused app/window looks like an active meeting. */
 export function isMeetingSurface(appName: string | undefined, windowTitle?: string): boolean {
   const app = appName?.toLowerCase() ?? ''

@@ -45,7 +45,6 @@ export type {
   ResponseCategory,
 } from './runtime/response-categoriser'
 export { mergeLoadedSessionMessages } from './session/merge-loaded-session-messages'
-export { estimateTokens, fitToTokenBudget } from './utils/token-juice'
 export type {
   ChatAssistantMessage,
   ChatHistoryItem,
@@ -60,10 +59,11 @@ export type {
   ErrorMessage,
   StreamingAssistantMessage,
 } from './types/chat'
-
 export type {
   BuiltinToolsResolver,
   StreamEvent,
   StreamFromOptions,
   StreamOptions,
 } from './types/llm'
+
+export { estimateTokens, fitToTokenBudget } from './utils/token-juice'

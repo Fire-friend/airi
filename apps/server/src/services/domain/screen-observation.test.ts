@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import type { TaskObservationFrame, TaskWorkingState } from '@proj-airi/server-sdk-shared'
 
 import {
   createScreenObservationTask,
-  DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
-  DEFAULT_TASK_COMPANION_THRESHOLDS,
   decideDailySummary,
   decideScreenObservationTouch,
+  DEFAULT_DAILY_SUMMARY_LOCAL_TIME,
+  DEFAULT_TASK_COMPANION_THRESHOLDS,
   isBarePercentage,
   normalizeScreenObserverSummary,
   resolveObservationPrivacyState,
@@ -14,7 +14,7 @@ import {
   TOUCH_THROTTLE_WINDOW_MS,
   transitionTaskWorkingState,
 } from '@proj-airi/server-sdk-shared'
-import type { TaskObservationFrame, TaskWorkingState } from '@proj-airi/server-sdk-shared'
+import { describe, expect, it } from 'vitest'
 
 const now = new Date('2026-06-11T03:00:00.000Z')
 

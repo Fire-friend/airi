@@ -32,13 +32,13 @@ export function estimateTokens(text: string): number {
  */
 export function stripControlChars(text: string): string {
   return text
-    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '') // CSI sequences (colors, cursor)
+    .replace(/\x1B\[[0-9;]*[A-Z]/gi, '') // CSI sequences (colors, cursor)
     .replace(/\x1B\][^\x07]*\x07/g, '') // OSC sequences (terminal title, etc.)
     .replace(/\x1B[PX^_][^\x1B]*\x1B\\/g, '') // DCS / SOS / PM / APC
     .replace(/\x1B./gs, '') // remaining ESC + any char
     .replace(/\r\n/g, '\n') // CRLF → LF
     .replace(/\r/g, '\n') // lone CR → LF
-    .replace(/[^\t\n\x20-\x7E-￿]/g, '') // non-printable except \t \n
+    .replace(/[^\t\n\x20-\x7E\u0080-\uFFFF]/g, '') // non-printable except \t \n
 }
 
 // ─── Log prefix stripping ─────────────────────────────────────────────────────
@@ -270,8 +270,7 @@ export function squeezeText(text: string, opts: TokenJuiceOptions = {}): string 
 
   if (simplifyFencedJson) {
     result = result.replace(/```json\n([\s\S]*?)```/g, (_, body: string) =>
-      `\`\`\`json\n${simplifyJsonString(body.trim(), jsonOpts)}\n\`\`\``,
-    )
+      `\`\`\`json\n${simplifyJsonString(body.trim(), jsonOpts)}\n\`\`\``)
   }
 
   if (dedupLines)
