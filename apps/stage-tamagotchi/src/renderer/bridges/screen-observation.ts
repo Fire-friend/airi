@@ -17,6 +17,7 @@ import {
   electronScreenObservationCurrentStateCaptured,
   electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
+  electronScreenObservationMuteTask,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationPause,
   electronScreenObservationResume,
@@ -106,6 +107,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
   const upsertTaskIpc = defineInvoke(context, electronScreenObservationUpsertTask)
   const forgetEvidenceIpc = defineInvoke(context, electronScreenObservationForgetTaskStateEvidence)
+  const muteTaskIpc = defineInvoke(context, electronScreenObservationMuteTask)
   const pauseIpc = defineInvoke(context, electronScreenObservationPause)
   const resumeIpc = defineInvoke(context, electronScreenObservationResume)
 
@@ -121,7 +123,7 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
         applyRuntimeState(state)
     },
     muteTask: async (taskId) => {
-      const state = await forgetEvidenceIpc({ taskId })
+      const state = await muteTaskIpc({ taskId })
       if (state)
         applyRuntimeState(state)
     },

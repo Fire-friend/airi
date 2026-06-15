@@ -16,6 +16,7 @@ import {
   electronScreenObservationCurrentStateCaptured,
   electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
+  electronScreenObservationMuteTask,
   electronScreenObservationPause,
   electronScreenObservationResume,
   electronScreenObservationStateChanged,
@@ -291,6 +292,7 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
     const context = createContext()
     const upsertTaskCalls: { task: Task }[] = []
     const forgetCalls: { taskId?: string }[] = []
+    const muteCalls: { taskId: string }[] = []
 
     const task = createScreenObservationTask({
       id: 'task-set-test',
@@ -309,8 +311,12 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
       forgetCalls.push(req ?? {})
       return runtimeState()
     })
+    defineInvokeHandler(context, electronScreenObservationMuteTask, (req) => {
+      muteCalls.push(req ?? { taskId: '' })
+      return runtimeState()
+    })
 
-    return { context, upsertTaskCalls, forgetCalls, task }
+    return { context, upsertTaskCalls, forgetCalls, muteCalls, task }
   }
 
   // NOTICE: context typed as `any` to avoid vue-tsc strict contravariance on EventContext generics.
@@ -393,6 +399,24 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
 
     expect(forgetCalls).toHaveLength(1)
     expect(forgetCalls[0]).toEqual({})
+
+    dispose()
+  })
+
+  it('muteTask invokes the mute IPC (not forgetEvidence) with the given taskId', async () => {
+    const { context, forgetCalls, muteCalls } = setupBridgeWithHandlers()
+    const store = useScreenObservationStore()
+
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.muteTask('task-set-test')
+
+    expect(muteCalls).toHaveLength(1)
+    expect(muteCalls[0]).toMatchObject({ taskId: 'task-set-test' })
+    // forgetEvidence must NOT be called — muteTask and forget are separate actions.
+    expect(forgetCalls).toHaveLength(0)
 
     dispose()
   })

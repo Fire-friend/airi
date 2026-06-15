@@ -37,6 +37,7 @@ import {
   electronScreenObservationCurrentStateCaptured,
   electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
+  electronScreenObservationMuteTask,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationPause,
   electronScreenObservationResume,
@@ -160,6 +161,7 @@ const taskSchema = object({
 
 const upsertTaskRequestSchema = object({ task: taskSchema })
 const forgetTaskStateEvidenceRequestSchema = object({ taskId: optional(pipe(string(), trim(), minLength(1), maxLength(64))) })
+const muteTaskRequestSchema = object({ taskId: pipe(string(), trim(), minLength(1), maxLength(64)) })
 
 const taskObservationEvidenceSchema = object({
   kind: picklist(['semantic_progress', 'subgoal_progress', 'new_task_artifact', 'repeated_error', 'search_doc_loop', 'no_progress', 'semantic_blocker', 'off_task']),
@@ -1125,6 +1127,12 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
     defineInvokeHandler(context, electronScreenObservationUpsertTask, request => upsertTask(parseIpcPayload(upsertTaskRequestSchema, request, 'screen observation task').task))
     defineInvokeHandler(context, electronScreenObservationForgetTaskStateEvidence, request =>
       forgetTaskStateEvidence(parseIpcPayload(forgetTaskStateEvidenceRequestSchema, request ?? {}, 'screen observation task-state forget')))
+    defineInvokeHandler(context, electronScreenObservationMuteTask, (request) => {
+      const { taskId } = parseIpcPayload(muteTaskRequestSchema, request, 'screen observation mute task')
+      const muted = applyTouchOutcome(ledgerEntryFor(taskId), { kind: 'action', action: 'mute_task' }, new Date())
+      saveLedgerEntry(taskId, muted)
+      return publishStateIfChanged()
+    })
   }
 
   const dispose: ScreenObserverService['dispose'] = () => {

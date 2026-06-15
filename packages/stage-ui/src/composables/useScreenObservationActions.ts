@@ -16,7 +16,7 @@ export interface ScreenObservationActions {
   upsertTask: (task: Task) => Promise<void>
   /** Clears task-companion evidence for one task (or all tasks when taskId is omitted). */
   forgetTaskStateEvidence: (taskId?: string) => Promise<void>
-  /** Mutes stuck nudges for a specific task by clearing its companion evidence. */
+  /** Permanently mutes stuck-task nudges by stamping `mutedAt` in the touch ledger; evidence is kept, future touches are suppressed. */
   muteTask: (taskId: string) => Promise<void>
   /** Pauses screen observation globally for the requested duration. */
   pauseObservation: (request: PauseObservationRequest) => Promise<void>

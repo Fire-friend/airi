@@ -11,9 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   electronScreenObservationForgetTaskStateEvidence,
+  electronScreenObservationMuteTask,
   electronScreenObservationPause,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
+  electronScreenObservationUpdateMineContextConfig,
   electronScreenObservationUpdateSettings,
   electronScreenObservationUpsertTask,
 } from '../../../../shared/eventa/screen-observation'
@@ -495,6 +497,168 @@ describe('screen observer end-to-end bridge', () => {
     await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS)
 
     const taskState = observer.getState().taskWorkingStates['task-incognito']
+    expect(taskState?.evidenceChain ?? []).toHaveLength(0)
+    expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(0)
+  })
+
+  it('muteTask stamps mutedAt in the ledger and suppresses subsequent task_blocked nudges', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+    const muteTask = defineInvoke(context, electronScreenObservationMuteTask)
+
+    getActivities.mockResolvedValue([
+      {
+        id: 'ctx-mute',
+        title: 'error in code',
+        summary: 'cannot fix the error in code',
+        keywords: [],
+        entities: [],
+        context_type: 'activity_context',
+        confidence: 90,
+        importance: 80,
+        create_time: new Date().toISOString(),
+        event_time: new Date().toISOString(),
+        raw_contexts: [
+          {
+            object_id: 'rc-mute',
+            content_format: 'image',
+            source: 'screenshot',
+            create_time: new Date().toISOString(),
+            additional_info: { app: 'Code', window: 'report.md' },
+          },
+        ],
+      },
+    ])
+
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    await updateSettings({ enabled: true, allowedApps: ['Code'] })
+    await upsertTask({ task: activeTask('task-mute') })
+
+    // Advance to stuck state so task_blocked fires.
+    for (let i = 0; i < 3; i++)
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS)
+
+    const blockedBefore = touches.filter(t => t.reason === 'task_blocked')
+    expect(blockedBefore).toHaveLength(1)
+
+    // Mute the task: must stamp mutedAt, NOT just clear evidence.
+    await muteTask({ taskId: 'task-mute' })
+    expect(observer.getTouchInteraction('task-mute').muted).toBe(true)
+
+    // Evidence chain must still be intact (mute != forget).
+    const stateAfterMute = observer.getState().taskWorkingStates['task-mute']
+    expect(stateAfterMute?.evidenceChain.length).toBeGreaterThan(0)
+
+    // Advance well past nudge cooldown: further task_blocked touches must be suppressed.
+    await vi.advanceTimersByTimeAsync(DEFAULT_TASK_COMPANION_THRESHOLDS.stuckDurationMs + POLL_INTERVAL_MS * 5)
+    expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(1)
+  })
+
+  it('currentStateTick: denied app in raw_context produces no task evidence (fast-track privacy)', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    // Route raw_context requests to denied content; long-memory track returns nothing.
+    getActivities.mockImplementation(async (opts: Parameters<typeof getActivities>[0]) => {
+      if (opts?.contextType === 'raw_context') {
+        return [
+          {
+            id: 'rc-denied',
+            context_type: 'raw_context',
+            confidence: 90,
+            importance: 80,
+            create_time: new Date().toISOString(),
+            event_time: new Date().toISOString(),
+            raw_contexts: [
+              {
+                object_id: 'rc-1password',
+                content_format: 'image',
+                source: 'screenshot',
+                create_time: new Date().toISOString(),
+                additional_info: { app: '1Password', window: 'Vault' },
+              },
+            ],
+          },
+        ]
+      }
+      return []
+    })
+
+    await updateSettings({ enabled: true, allowedApps: ['1Password'] })
+    await updateMineContextConfig({ screenshotCaptureEnabled: true })
+    const task = createScreenObservationTask({
+      id: 'task-cs-denied',
+      userId: 'user-1',
+      title: 'Manage credentials',
+      status: 'active',
+      observation: { allowedApps: ['1Password'] },
+      progressNarrative: { remainingWork: 'review entries', isOffTrack: false },
+    }, new Date('2026-06-11T10:00:00.000Z'))
+    await upsertTask({ task })
+
+    // Advance several current-state poll intervals (15 s each).
+    for (let i = 0; i < 5; i++)
+      await vi.advanceTimersByTimeAsync(15_000)
+
+    // buildCurrentStateFrame must have returned undefined for every tick:
+    // no evidence, no working state written.
+    const taskState = observer.getState().taskWorkingStates['task-cs-denied']
+    expect(taskState?.evidenceChain ?? []).toHaveLength(0)
+  })
+
+  it('currentStateTick: private window in raw_context produces no task evidence (fast-track privacy)', async () => {
+    const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
+    const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
+    const upsertTask = defineInvoke(context, electronScreenObservationUpsertTask)
+
+    getActivities.mockImplementation(async (opts: Parameters<typeof getActivities>[0]) => {
+      if (opts?.contextType === 'raw_context') {
+        return [
+          {
+            id: 'rc-incognito',
+            context_type: 'raw_context',
+            confidence: 90,
+            importance: 80,
+            create_time: new Date().toISOString(),
+            event_time: new Date().toISOString(),
+            raw_contexts: [
+              {
+                object_id: 'rc-private',
+                content_format: 'image',
+                source: 'screenshot',
+                create_time: new Date().toISOString(),
+                additional_info: { app: 'Chrome', window: 'Incognito Mode' },
+              },
+            ],
+          },
+        ]
+      }
+      return []
+    })
+
+    await updateSettings({ enabled: true, allowedApps: ['Chrome'] })
+    await updateMineContextConfig({ screenshotCaptureEnabled: true })
+    const task = createScreenObservationTask({
+      id: 'task-cs-incognito',
+      userId: 'user-1',
+      title: 'Browse docs',
+      status: 'active',
+      observation: { allowedApps: ['Chrome'] },
+      progressNarrative: { remainingWork: 'read pages', isOffTrack: false },
+    }, new Date('2026-06-11T10:00:00.000Z'))
+    await upsertTask({ task })
+
+    const touches: TouchEventPayload[] = []
+    context.on(electronScreenObservationTouchDelivered, event => touches.push(event.body!))
+
+    for (let i = 0; i < 5; i++)
+      await vi.advanceTimersByTimeAsync(15_000)
+
+    const taskState = observer.getState().taskWorkingStates['task-cs-incognito']
     expect(taskState?.evidenceChain ?? []).toHaveLength(0)
     expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(0)
   })

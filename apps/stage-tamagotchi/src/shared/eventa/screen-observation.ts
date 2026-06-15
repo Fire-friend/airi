@@ -117,6 +117,13 @@ export const electronScreenObservationResume = defineInvokeEventa<ScreenObservat
 export const electronScreenObservationUpsertTask = defineInvokeEventa<ScreenObservationRuntimeState, { task: Task }>('eventa:invoke:electron:screen-observation:upsert-task')
 /** Clears task-companion evidence without deleting the task or promoting it into personality memory. */
 export const electronScreenObservationForgetTaskStateEvidence = defineInvokeEventa<ScreenObservationRuntimeState, ForgetTaskStateEvidenceRequest>('eventa:invoke:electron:screen-observation:forget-task-state-evidence')
+/**
+ * Permanently mutes stuck-task nudges for a task by stamping `mutedAt` in its
+ * touch-interaction ledger. Unlike `forgetTaskStateEvidence`, this suppresses
+ * ALL future `task_blocked` touches for the task — the evidence chain is left
+ * intact so history is not lost.
+ */
+export const electronScreenObservationMuteTask = defineInvokeEventa<ScreenObservationRuntimeState, { taskId: string }>('eventa:invoke:electron:screen-observation:mute-task')
 
 export const electronScreenObservationStateChanged = defineEventa<ScreenObservationRuntimeState>('eventa:event:electron:screen-observation:state-changed')
 export const electronScreenObservationSummaryCaptured = defineEventa<{ summary: ScreenObserverSummary }>('eventa:event:electron:screen-observation:summary-captured')
