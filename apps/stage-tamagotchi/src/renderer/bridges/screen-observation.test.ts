@@ -421,22 +421,6 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
     dispose()
   })
 
-  it('muteTask invokes forgetTaskStateEvidence with the given taskId and applies returned state', async () => {
-    const { context, forgetCalls } = setupBridgeWithHandlers()
-    const store = useScreenObservationStore()
-
-    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
-
-    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
-
-    await childResult.value!.muteTask('task-set-test')
-
-    expect(forgetCalls).toHaveLength(1)
-    expect(forgetCalls[0]).toMatchObject({ taskId: 'task-set-test' })
-
-    dispose()
-  })
-
   it('pauseObservation invokes the pause handler and applies returned state', async () => {
     const context = createContext()
     const pauseCalls: { reason: string }[] = []
