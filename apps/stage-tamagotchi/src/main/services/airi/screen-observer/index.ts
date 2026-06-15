@@ -943,6 +943,25 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
   }
 
   /**
+   * Builds the `remainingWork` text for a stuck nudge from evidence priority.
+   *
+   * Prefers the most specific signal so the touch names what the model actually
+   * saw ("repeated error surface for 12 minutes") instead of generic fallback copy.
+   * Falls back to the task's existing progress narrative or an empty string when
+   * no actionable evidence is present.
+   */
+  function buildStuckNudgeText(signal: TaskCompanionSignal, task: Task): string {
+    const priority = ['semantic_blocker', 'search_doc_loop', 'repeated_error', 'no_progress'] as const
+    const reversed = signal.evidence.slice().reverse()
+    for (const kind of priority) {
+      const entry = reversed.find(e => e.kind === kind)
+      if (entry)
+        return entry.description
+    }
+    return task.progressNarrative?.remainingWork ?? ''
+  }
+
+  /**
    * Dispatches a `task_blocked` touch when the companion signals that the user
    * is stuck and has not been nudged for this episode yet.
    *
@@ -964,7 +983,7 @@ export function setupScreenObserver(options: SetupScreenObserverOptions): Screen
       task,
       reason: 'task_blocked',
       message: {
-        remainingWork: task.progressNarrative?.remainingWork ?? '',
+        remainingWork: buildStuckNudgeText(signal, task),
         etaAt: task.progressNarrative?.etaAt,
         pace: task.progressNarrative?.pace,
         isOffTrack: true,

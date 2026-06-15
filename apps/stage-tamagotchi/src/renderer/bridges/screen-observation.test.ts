@@ -1,20 +1,26 @@
+// @vitest-environment jsdom
 import type { ScreenObservationSettings, ScreenObserverSummary, Task, TaskWorkingState, TouchEventPayload } from '@proj-airi/server-sdk-shared'
 import type { ScreenObservationContextUpdate } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 
 import type { ScreenObservationRuntimeState } from '../../shared/eventa'
 
 import { createContext, defineInvokeHandler } from '@moeru/eventa'
+import { createScreenObservationTask } from '@proj-airi/server-sdk-shared'
+import { ScreenObservationActionsKey } from '@proj-airi/stage-ui/composables/useScreenObservationActions'
 import { useScreenObservationStore } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, defineComponent, h, inject } from 'vue'
 
 import {
   electronScreenObservationCurrentStateCaptured,
+  electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
   electronScreenObservationUpdateSettings,
+  electronScreenObservationUpsertTask,
 } from '../../shared/eventa'
 import { initializeScreenObservationBridge, observationSettingsKey } from './screen-observation'
 
@@ -270,5 +276,115 @@ describe('observationSettingsKey', () => {
     expect(observationSettingsKey({ ...base, allowedApps: ['a', 'b'] })).not.toBe(observationSettingsKey(base))
     expect(observationSettingsKey({ ...base, enabled: false })).not.toBe(observationSettingsKey(base))
     expect(observationSettingsKey({ ...base, dailySummaryAtLocalTime: '19:00' })).not.toBe(observationSettingsKey(base))
+  })
+})
+
+describe('initializeScreenObservationBridge task actions (ScreenObservationActionsKey)', () => {
+  beforeEach(() => {
+    globalThis.localStorage?.clear()
+    setActivePinia(createPinia())
+  })
+
+  function setupBridgeWithHandlers() {
+    const context = createContext()
+    const upsertTaskCalls: { task: Task }[] = []
+    const forgetCalls: { taskId?: string }[] = []
+
+    const task = createScreenObservationTask({
+      id: 'task-set-test',
+      userId: 'local',
+      title: 'Review PR',
+      status: 'active',
+      observation: { allowedApps: ['GitHub'] },
+    }, new Date('2026-06-15T10:00:00.000Z'))
+
+    defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationUpsertTask, (req) => {
+      upsertTaskCalls.push(req ?? { task: task! })
+      return runtimeState({ tasks: [req?.task ?? task] })
+    })
+    defineInvokeHandler(context, electronScreenObservationForgetTaskStateEvidence, (req) => {
+      forgetCalls.push(req ?? {})
+      return runtimeState()
+    })
+
+    return { context, upsertTaskCalls, forgetCalls, task }
+  }
+
+  // NOTICE: context typed as `any` to avoid vue-tsc strict contravariance on EventContext generics.
+  function mountBridgeWithChild<T>(
+    context: any,
+    childSetup: () => T,
+  ): { app: ReturnType<typeof createApp>, childResult: { value: T | undefined }, dispose: () => void } {
+    let disposeRef: (() => void) = () => {}
+    const childResult: { value: T | undefined } = { value: undefined }
+
+    const Child = defineComponent({
+      setup() {
+        childResult.value = childSetup()
+        return () => {}
+      },
+    })
+
+    const Parent = defineComponent({
+      setup() {
+        disposeRef = initializeScreenObservationBridge({ context })
+        return () => h(Child)
+      },
+    })
+
+    const app = createApp(Parent)
+    app.mount(document.createElement('div'))
+
+    return { app, childResult, dispose: () => { app.unmount(); disposeRef() } }
+  }
+
+  it('upsertTask invokes the main-process handler and applies the returned state to the store', async () => {
+    const { context, upsertTaskCalls, task } = setupBridgeWithHandlers()
+    const store = useScreenObservationStore()
+
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.upsertTask(task)
+
+    expect(upsertTaskCalls).toHaveLength(1)
+    expect(upsertTaskCalls[0]!.task.id).toBe('task-set-test')
+    expect(store.tasks.map(t => t.id)).toContain('task-set-test')
+
+    dispose()
+  })
+
+  it('forgetTaskStateEvidence invokes the main-process handler with the given taskId', async () => {
+    const { context, forgetCalls } = setupBridgeWithHandlers()
+    const store = useScreenObservationStore()
+
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.forgetTaskStateEvidence('task-set-test')
+
+    expect(forgetCalls).toHaveLength(1)
+    expect(forgetCalls[0]).toMatchObject({ taskId: 'task-set-test' })
+
+    dispose()
+  })
+
+  it('forgetTaskStateEvidence clears all evidence when no taskId is given', async () => {
+    const { context, forgetCalls } = setupBridgeWithHandlers()
+    const store = useScreenObservationStore()
+
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.forgetTaskStateEvidence()
+
+    expect(forgetCalls).toHaveLength(1)
+    expect(forgetCalls[0]).toEqual({})
+
+    dispose()
   })
 })

@@ -7,6 +7,8 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { useScreenObservationStore } from '../../stores/modules/screen-observation'
+import TaskCompanionStatus from './TaskCompanionStatus.vue'
+import TaskSetEntry from './TaskSetEntry.vue'
 
 const { t, locale } = useI18n()
 const tn = (key: string, params?: Record<string, unknown>) => t(`settings.pages.modules.screen-observation.${key}`, params ?? {})
@@ -127,6 +129,10 @@ function deleteTodayLog() {
     </TransitionVertical>
 
     <template v-if="enabled">
+      <TaskCompanionStatus />
+
+      <TaskSetEntry />
+
       <section flex="~ col gap-3">
         <Callout v-if="showEmptyWhitelistWarning" theme="orange" :label="tn('whitelist.empty-title')">
           {{ tn('status.not-observing-empty-whitelist') }}

@@ -6,13 +6,16 @@ import type { ScreenObservationRuntimeState } from '../../shared/eventa'
 
 import { defineInvoke } from '@moeru/eventa'
 import { getElectronEventaContext } from '@proj-airi/electron-vueuse'
+import { ScreenObservationActionsKey } from '@proj-airi/stage-ui/composables/useScreenObservationActions'
 import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
 import { useScreenObservationStore } from '@proj-airi/stage-ui/stores/modules/screen-observation'
 import { watchDebounced } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
+import { provide } from 'vue'
 
 import {
   electronScreenObservationCurrentStateCaptured,
+  electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
   electronScreenObservationOpenTaskDetails,
   electronScreenObservationStateChanged,
@@ -20,6 +23,7 @@ import {
   electronScreenObservationTouchDelivered,
   electronScreenObservationUpdateMineContextConfig,
   electronScreenObservationUpdateSettings,
+  electronScreenObservationUpsertTask,
 } from '../../shared/eventa'
 
 /**
@@ -98,6 +102,21 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   const getState = defineInvoke(context, electronScreenObservationGetState)
   const updateSettings = defineInvoke(context, electronScreenObservationUpdateSettings)
   const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
+  const upsertTaskIpc = defineInvoke(context, electronScreenObservationUpsertTask)
+  const forgetEvidenceIpc = defineInvoke(context, electronScreenObservationForgetTaskStateEvidence)
+
+  provide(ScreenObservationActionsKey, {
+    upsertTask: async (task) => {
+      const state = await upsertTaskIpc({ task })
+      if (state)
+        applyRuntimeState(state)
+    },
+    forgetTaskStateEvidence: async (taskId) => {
+      const state = await forgetEvidenceIpc(taskId ? { taskId } : {})
+      if (state)
+        applyRuntimeState(state)
+    },
+  })
 
   let lastKnownRemoteKey: string | undefined
 

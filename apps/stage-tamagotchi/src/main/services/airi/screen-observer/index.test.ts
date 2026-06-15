@@ -307,6 +307,13 @@ describe('screen observer end-to-end bridge', () => {
     expect(blockedTouches).toHaveLength(1)
     expect(blockedTouches[0]!.taskId).toBe('task-stuck')
 
+    // The stuck nudge must earn the interrupt: message.remainingWork should name
+    // the specific evidence the companion saw, not the task's generic narrative.
+    // The mock summary contains "cannot" (blockerTerms) → semantic_blocker evidence.
+    const nudgeText = blockedTouches[0]!.message.remainingWork
+    expect(nudgeText).toBe('Summary contains conservative blocker language.')
+    expect(nudgeText).not.toBe('two sections left, about 40 minutes')
+
     // Second stuck tick in same episode: shouldNudge=false → no additional touch.
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
     expect(touches.filter(t => t.reason === 'task_blocked')).toHaveLength(1)

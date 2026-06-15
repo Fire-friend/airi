@@ -878,6 +878,39 @@ pages:
         long-memory-interval:
           label: 活动摘要轮询间隔（毫秒）
           description: 向 MineContext 查询新 activity_context 条目的频率，最低 10 000 毫秒。
+      task-entry:
+        title: 设置当前任务
+        description: 告诉 AIRI 你在做什么。它会监视你列出的应用，并在你似乎遇到阻碍时提醒你。
+        task-title:
+          label: 你在做什么？
+          placeholder: 例如：写引言部分
+        goal:
+          label: 子目标（可选）
+          description: 更具体的目标——AIRI 用它来判断什么算作"进展"。
+          placeholder: 例如：起草三段关于问题的内容
+        apps:
+          label: 此任务要观察的应用
+          description: 留空则使用全局白名单。
+          placeholder: 例如：Obsidian
+        set: 设为当前任务
+      task-companion:
+        title: 任务伴侣
+        description: AIRI 追踪你是在持续推进还是在某个问题上反复循环。
+        state:
+          idle: 空闲
+          progressing: 进展中
+          possibly_stuck: 可能卡住了
+          stuck: 卡住了
+          off_task: 偏离任务
+        stuck:
+          generic: 你在这里停滞了一段时间。
+          suggestion: 想让我帮你梳理一下思路吗？
+        stuck-duration: '{minutes} 分钟'
+        last-progress: '上次进展：{time}'
+        last-nudge: '上次提醒：{time}'
+        actions:
+          forget-evidence: 清除此阶段
+          complete: 完成
   flux:
     title: Flux
     buy: 充值

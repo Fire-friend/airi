@@ -914,6 +914,39 @@ pages:
         long-memory-interval:
           label: Activity summary poll interval (ms)
           description: How often to query MineContext for new activity_context entries. Minimum 10 000 ms.
+      task-entry:
+        title: Set current task
+        description: Tell AIRI what you're working on. It will watch the apps you listed and let you know if you seem stuck.
+        task-title:
+          label: What are you working on?
+          placeholder: e.g. Write the introduction section
+        goal:
+          label: Sub-goal (optional)
+          description: A more specific target — AIRI uses this to decide what "progress" looks like.
+          placeholder: e.g. Draft three paragraphs about the problem
+        apps:
+          label: Apps to observe for this task
+          description: Leave blank to use your global whitelist.
+          placeholder: e.g. Obsidian
+        set: Set as current task
+      task-companion:
+        title: Task companion
+        description: AIRI tracks whether you're moving forward or cycling on a problem.
+        state:
+          idle: Idle
+          progressing: Progressing
+          possibly_stuck: May be stuck
+          stuck: Stuck
+          off_task: Off task
+        stuck:
+          generic: You've been stuck on this for a while.
+          suggestion: Want me to organize the clues?
+        stuck-duration: '{minutes} min'
+        last-progress: 'Last progress: {time}'
+        last-nudge: 'Last nudge: {time}'
+        actions:
+          forget-evidence: Clear this episode
+          complete: Done
   flux:
     title: Flux
     buy: Charge
