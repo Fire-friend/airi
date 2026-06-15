@@ -911,6 +911,10 @@ pages:
         actions:
           forget-evidence: 清除此阶段
           complete: 完成
+          mute: 静音任务
+          pause-15m: 暂停 15 分钟
+          pause-1h: 暂停 1 小时
+          resume: 恢复
   flux:
     title: Flux
     buy: 充值

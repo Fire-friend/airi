@@ -16,6 +16,8 @@ import {
   electronScreenObservationCurrentStateCaptured,
   electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
+  electronScreenObservationPause,
+  electronScreenObservationResume,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -391,6 +393,73 @@ describe('initializeScreenObservationBridge task actions (ScreenObservationActio
 
     expect(forgetCalls).toHaveLength(1)
     expect(forgetCalls[0]).toEqual({})
+
+    dispose()
+  })
+
+  it('muteTask invokes forgetTaskStateEvidence with the given taskId and applies returned state', async () => {
+    const { context, forgetCalls } = setupBridgeWithHandlers()
+    const store = useScreenObservationStore()
+
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.muteTask('task-set-test')
+
+    expect(forgetCalls).toHaveLength(1)
+    expect(forgetCalls[0]).toMatchObject({ taskId: 'task-set-test' })
+
+    dispose()
+  })
+
+  it('pauseObservation invokes the pause handler and applies returned state', async () => {
+    const context = createContext()
+    const pauseCalls: { reason: string }[] = []
+
+    defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationForgetTaskStateEvidence, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationUpsertTask, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationPause, (req) => {
+      pauseCalls.push(req ?? { reason: 'manual_15m' })
+      return runtimeState({ privacyState: 'paused', ...{ pauseUntil: '2099-01-01T00:00:00Z' } })
+    })
+
+    const store = useScreenObservationStore()
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.pauseObservation({ reason: 'manual_15m' })
+
+    expect(pauseCalls).toHaveLength(1)
+    expect(pauseCalls[0]).toMatchObject({ reason: 'manual_15m' })
+    expect(store.privacyState).toBe('paused')
+
+    dispose()
+  })
+
+  it('resumeObservation invokes the resume handler and applies returned state', async () => {
+    const context = createContext()
+    let resumeCalled = false
+
+    defineInvokeHandler(context, electronScreenObservationGetState, () => runtimeState({ privacyState: 'paused' }))
+    defineInvokeHandler(context, electronScreenObservationForgetTaskStateEvidence, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationUpsertTask, () => runtimeState())
+    defineInvokeHandler(context, electronScreenObservationResume, () => {
+      resumeCalled = true
+      return runtimeState({ settings: { enabled: true, mode: 'whitelist', allowedApps: ['Obsidian'], dailySummaryEnabled: true, dailySummaryAtLocalTime: '18:00' }, privacyState: 'observing' })
+    })
+
+    const store = useScreenObservationStore()
+    const { childResult, dispose } = mountBridgeWithChild(context, () => inject(ScreenObservationActionsKey))
+
+    await vi.waitFor(() => expect(store.observationSourceAvailable).toBe(true))
+
+    await childResult.value!.resumeObservation()
+
+    expect(resumeCalled).toBe(true)
+    expect(store.privacyState).toBe('observing')
 
     dispose()
   })

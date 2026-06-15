@@ -6,9 +6,10 @@ import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-import { useScreenObservationStore } from '../../stores/modules/screen-observation'
 import TaskCompanionStatus from './TaskCompanionStatus.vue'
 import TaskSetEntry from './TaskSetEntry.vue'
+
+import { useScreenObservationStore } from '../../stores/modules/screen-observation'
 
 const { t, locale } = useI18n()
 const tn = (key: string, params?: Record<string, unknown>) => t(`settings.pages.modules.screen-observation.${key}`, params ?? {})

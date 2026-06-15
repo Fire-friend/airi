@@ -61,6 +61,16 @@ describe('stuckEvidenceText', () => {
     expect(stuckEvidenceText(state)).toBe('Summary contains conservative blocker language.')
   })
 
+  it('prefers semantic_blocker over repeated_error when both compete', () => {
+    const state = stateFixture({
+      evidenceChain: [
+        { kind: 'repeated_error', description: 'Same error repeated 3 times.', capturedAt: '2026-06-15T10:00:00Z' },
+        { kind: 'semantic_blocker', description: 'Summary contains blocker language: "cannot proceed without access".', capturedAt: '2026-06-15T10:05:00Z' },
+      ],
+    })
+    expect(stuckEvidenceText(state)).toBe('Summary contains blocker language: "cannot proceed without access".')
+  })
+
   it('falls back to no_progress when that is the only entry', () => {
     const state = stateFixture({
       evidenceChain: [

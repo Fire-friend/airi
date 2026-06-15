@@ -1,4 +1,4 @@
-import type { Task } from '@proj-airi/server-sdk-shared'
+import type { PauseObservationRequest, Task } from '@proj-airi/server-sdk-shared'
 import type { InjectionKey } from 'vue'
 
 import { inject } from 'vue'
@@ -16,6 +16,12 @@ export interface ScreenObservationActions {
   upsertTask: (task: Task) => Promise<void>
   /** Clears task-companion evidence for one task (or all tasks when taskId is omitted). */
   forgetTaskStateEvidence: (taskId?: string) => Promise<void>
+  /** Mutes stuck nudges for a specific task by clearing its companion evidence. */
+  muteTask: (taskId: string) => Promise<void>
+  /** Pauses screen observation globally for the requested duration. */
+  pauseObservation: (request: PauseObservationRequest) => Promise<void>
+  /** Resumes screen observation if it is currently paused. */
+  resumeObservation: () => Promise<void>
 }
 
 export const ScreenObservationActionsKey: InjectionKey<ScreenObservationActions> = Symbol('screen-observation-actions')

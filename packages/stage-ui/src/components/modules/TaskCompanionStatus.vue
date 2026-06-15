@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Task, TaskObservationEvidenceKind, TaskWorkingState } from '@proj-airi/server-sdk-shared'
+import type { PauseObservationRequest, Task, TaskObservationEvidenceKind, TaskWorkingState } from '@proj-airi/server-sdk-shared'
 
 import { Button } from '@proj-airi/ui'
 import { storeToRefs } from 'pinia'
@@ -14,7 +14,7 @@ const { t, locale } = useI18n()
 const tn = (key: string, params?: Record<string, unknown>) => t(`settings.pages.modules.screen-observation.task-companion.${key}`, params ?? {})
 
 const store = useScreenObservationStore()
-const { activeTasks, taskWorkingStates } = storeToRefs(store)
+const { activeTasks, taskWorkingStates, privacyState } = storeToRefs(store)
 const actions = useScreenObservationActions()
 
 interface TaskEntry {
@@ -76,6 +76,18 @@ async function forgetEvidence(taskId: string) {
 async function completeTask(task: Task) {
   await actions?.upsertTask({ ...task, status: 'completed' })
 }
+
+async function muteTask(taskId: string) {
+  await actions?.muteTask(taskId)
+}
+
+async function pause(reason: PauseObservationRequest['reason']) {
+  await actions?.pauseObservation({ reason })
+}
+
+async function resume() {
+  await actions?.resumeObservation()
+}
 </script>
 
 <template>
@@ -128,7 +140,7 @@ async function completeTask(task: Task) {
         <div class="flex items-start gap-2">
           <span class="i-solar:fire-bold-duotone mt-0.5 size-4 shrink-0 text-red-500" />
           <div flex="~ col gap-1">
-            <p class="m-0 text-xs font-medium text-red-700 dark:text-red-400">
+            <p class="m-0 text-xs text-red-700 font-medium dark:text-red-400">
               {{ stuckEvidenceText(state) ?? tn('stuck.generic') }}
               <span v-if="stuckDurationText(state)" class="ml-1 font-normal opacity-75">
                 ({{ stuckDurationText(state) }})
@@ -162,7 +174,7 @@ async function completeTask(task: Task) {
         <span v-if="state.lastNudgeAt">{{ tn('last-nudge', { time: formatTime(state.lastNudgeAt) }) }}</span>
       </div>
 
-      <!-- Companion controls: clear episode evidence or mark complete -->
+      <!-- Companion controls: task-level and observation-level actions -->
       <div class="flex flex-wrap gap-2">
         <Button
           variant="secondary"
@@ -174,9 +186,43 @@ async function completeTask(task: Task) {
         <Button
           variant="secondary"
           size="sm"
+          icon="i-solar:bell-bold-duotone"
+          :label="tn('actions.mute')"
+          @click="muteTask(task.id)"
+        />
+        <Button
+          variant="secondary"
+          size="sm"
           icon="i-solar:check-circle-bold-duotone"
           :label="tn('actions.complete')"
           @click="completeTask(task)"
+        />
+      </div>
+
+      <!-- Observation pause/resume controls (global, shown per-task card for quick access) -->
+      <div v-if="privacyState !== 'paused'" class="flex flex-wrap gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          icon="i-solar:pause-bold-duotone"
+          :label="tn('actions.pause-15m')"
+          @click="pause('manual_15m')"
+        />
+        <Button
+          variant="secondary"
+          size="sm"
+          icon="i-solar:pause-bold-duotone"
+          :label="tn('actions.pause-1h')"
+          @click="pause('manual_1h')"
+        />
+      </div>
+      <div v-else class="flex flex-wrap gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          icon="i-solar:play-bold-duotone"
+          :label="tn('actions.resume')"
+          @click="resume()"
         />
       </div>
     </div>

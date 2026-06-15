@@ -2,9 +2,9 @@ import type { TaskObservationEvidenceKind, TaskWorkingState } from '@proj-airi/s
 
 /** Priority order for the stuck nudge: most specific first so the interrupt names the concrete signal. */
 const STUCK_EVIDENCE_PRIORITY: TaskObservationEvidenceKind[] = [
-  'repeated_error',
-  'search_doc_loop',
   'semantic_blocker',
+  'search_doc_loop',
+  'repeated_error',
   'no_progress',
 ]
 

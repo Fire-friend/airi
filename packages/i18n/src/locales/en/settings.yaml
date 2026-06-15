@@ -947,6 +947,10 @@ pages:
         actions:
           forget-evidence: Clear this episode
           complete: Done
+          mute: Mute task
+          pause-15m: Pause 15 min
+          pause-1h: Pause 1 h
+          resume: Resume
   flux:
     title: Flux
     buy: Charge

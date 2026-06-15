@@ -18,6 +18,8 @@ import {
   electronScreenObservationForgetTaskStateEvidence,
   electronScreenObservationGetState,
   electronScreenObservationOpenTaskDetails,
+  electronScreenObservationPause,
+  electronScreenObservationResume,
   electronScreenObservationStateChanged,
   electronScreenObservationSummaryCaptured,
   electronScreenObservationTouchDelivered,
@@ -104,6 +106,8 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
   const updateMineContextConfig = defineInvoke(context, electronScreenObservationUpdateMineContextConfig)
   const upsertTaskIpc = defineInvoke(context, electronScreenObservationUpsertTask)
   const forgetEvidenceIpc = defineInvoke(context, electronScreenObservationForgetTaskStateEvidence)
+  const pauseIpc = defineInvoke(context, electronScreenObservationPause)
+  const resumeIpc = defineInvoke(context, electronScreenObservationResume)
 
   provide(ScreenObservationActionsKey, {
     upsertTask: async (task) => {
@@ -113,6 +117,21 @@ export function initializeScreenObservationBridge(options: ScreenObservationBrid
     },
     forgetTaskStateEvidence: async (taskId) => {
       const state = await forgetEvidenceIpc(taskId ? { taskId } : {})
+      if (state)
+        applyRuntimeState(state)
+    },
+    muteTask: async (taskId) => {
+      const state = await forgetEvidenceIpc({ taskId })
+      if (state)
+        applyRuntimeState(state)
+    },
+    pauseObservation: async (request) => {
+      const state = await pauseIpc(request)
+      if (state)
+        applyRuntimeState(state)
+    },
+    resumeObservation: async () => {
+      const state = await resumeIpc()
       if (state)
         applyRuntimeState(state)
     },
