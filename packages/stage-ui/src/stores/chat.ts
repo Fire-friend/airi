@@ -158,6 +158,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     getActiveProvider: () => activeProvider.value,
     getSystemPromptSupplement: () => llmToolsetPromptsStore.activeToolsetPrompt,
     runtimeContextProviders: [
+      () => consciousnessStore.createSelfAwarenessContextMessage(),
       createMinecraftContext,
     ],
     createId: nanoid,
@@ -165,19 +166,25 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     onStateChange: syncRuntimeState,
     onSendSettled: settleOwnedActiveTurnSpan,
     onTrackFirstMessage: trackFirstMessage,
-    onMessageSendStarted: ({ source, model }) => trackMessageSendStarted({
-      source,
-      model,
-    }),
+    onMessageSendStarted: ({ source, model }) => {
+      consciousnessStore.setCurrentActivity('preparing-response')
+      trackMessageSendStarted({
+        source,
+        model,
+      })
+    },
     onLlmRequestStarted: ({ model, provider, hasVoice }) => trackLlmRequestStarted({
       model,
       provider,
       has_voice: hasVoice,
     }),
-    onLlmFirstToken: ({ model, ttfbMs }) => trackLlmFirstToken({
-      model,
-      ttfb_ms: ttfbMs,
-    }),
+    onLlmFirstToken: ({ model, ttfbMs }) => {
+      consciousnessStore.setCurrentActivity('responding')
+      trackLlmFirstToken({
+        model,
+        ttfb_ms: ttfbMs,
+      })
+    },
     onAssistantResponseRendered: ({ model, latencyMs }) => trackAssistantResponseRendered({
       model,
       latency_ms: latencyMs,
@@ -229,7 +236,15 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     options: ChatOrchestratorSendOptions,
     targetSessionId?: string,
   ) {
+    consciousnessStore.setCurrentIntent(sendingMessage)
+    consciousnessStore.setCurrentActivity('preparing-response')
     return runtime.ingest(sendingMessage, options, targetSessionId)
+      .finally(() => {
+        if (consciousnessStore.currentIntent === sendingMessage)
+          consciousnessStore.clearCurrentIntent()
+        if (runtime.getPendingQueuedSendCount() === 0 && !runtime.getSending())
+          consciousnessStore.setCurrentActivity('idle')
+      })
   }
 
   async function ingestOnFork(
