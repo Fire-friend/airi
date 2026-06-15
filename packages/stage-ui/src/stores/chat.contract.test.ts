@@ -42,6 +42,10 @@ const trackFirstMessageMock = vi.fn()
 const ingestContextMessageMock = vi.fn()
 const getContextsSnapshotMock = vi.fn()
 const createMinecraftContextMock = vi.fn()
+const createSelfAwarenessContextMessageMock = vi.fn()
+const setCurrentIntentMock = vi.fn()
+const setCurrentActivityMock = vi.fn()
+const clearCurrentIntentMock = vi.fn()
 const persistSessionMessagesMock = vi.fn()
 const forkSessionMock = vi.fn()
 const ensureSessionMock = vi.fn()
@@ -129,6 +133,11 @@ vi.mock('./llm-toolset-prompts', () => ({
 vi.mock('./modules/consciousness', () => ({
   useConsciousnessStore: () => ({
     activeProvider: ref('mock-provider'),
+    currentIntent: ref(''),
+    createSelfAwarenessContextMessage: createSelfAwarenessContextMessageMock,
+    setCurrentIntent: setCurrentIntentMock,
+    setCurrentActivity: setCurrentActivityMock,
+    clearCurrentIntent: clearCurrentIntentMock,
   }),
 }))
 
@@ -158,6 +167,11 @@ describe('chat orchestrator contract', () => {
     getContextsSnapshotMock.mockReturnValue({})
     createMinecraftContextMock.mockReset()
     createMinecraftContextMock.mockReturnValue(undefined)
+    createSelfAwarenessContextMessageMock.mockReset()
+    createSelfAwarenessContextMessageMock.mockReturnValue(undefined)
+    setCurrentIntentMock.mockReset()
+    setCurrentActivityMock.mockReset()
+    clearCurrentIntentMock.mockReset()
     persistSessionMessagesMock.mockReset()
     forkSessionMock.mockReset()
     ensureSessionMock.mockReset()
@@ -372,6 +386,13 @@ describe('chat orchestrator contract', () => {
    * The facade passes it into the core runtime before prompt snapshots are read.
    */
   it('ingests runtime context providers before composing prompt snapshots', async () => {
+    const selfAwarenessContext = {
+      id: 'self-awareness-context',
+      contextId: 'consciousness:self-awareness',
+      strategy: 'replace-self',
+      text: 'activity is preparing-response',
+      createdAt: 122,
+    }
     const minecraftContext = {
       id: 'minecraft-context',
       contextId: 'system:minecraft',
@@ -382,8 +403,10 @@ describe('chat orchestrator contract', () => {
     }
     let composedMessages: Message[] = []
 
+    createSelfAwarenessContextMessageMock.mockReturnValue(selfAwarenessContext)
     createMinecraftContextMock.mockReturnValue(minecraftContext)
     getContextsSnapshotMock.mockReturnValue({
+      'consciousness:self-awareness': [selfAwarenessContext],
       'system:minecraft': [minecraftContext],
     })
     llmStreamMock.mockImplementation(async (_model: string, _chatProvider: ChatProvider, messages: Message[], options: any) => {
@@ -399,14 +422,20 @@ describe('chat orchestrator contract', () => {
       chatProvider: provider,
     })
 
-    expect(ingestContextMessageMock).toHaveBeenCalledTimes(1)
-    expect(ingestContextMessageMock).toHaveBeenCalledWith(minecraftContext)
+    expect(setCurrentIntentMock).toHaveBeenCalledWith('where am I?')
+    expect(setCurrentActivityMock).toHaveBeenCalledWith('preparing-response')
+    expect(ingestContextMessageMock).toHaveBeenCalledTimes(2)
+    expect(ingestContextMessageMock).toHaveBeenNthCalledWith(1, selfAwarenessContext)
+    expect(ingestContextMessageMock).toHaveBeenNthCalledWith(2, minecraftContext)
     expect(ingestContextMessageMock.mock.invocationCallOrder[0]).toBeLessThan(
       getContextsSnapshotMock.mock.invocationCallOrder[0],
     )
     const minecraftMessageContent = composedMessages[1]?.content
     if (!Array.isArray(minecraftMessageContent))
       throw new TypeError('Expected composed user message content to be an array')
+    expect(minecraftMessageContent[1]).toMatchObject({
+      text: expect.stringContaining('- consciousness:self-awareness: activity is preparing-response'),
+    })
     expect(minecraftMessageContent[1]).toMatchObject({
       text: expect.stringContaining('- system:minecraft: player is near spawn'),
     })
