@@ -3,18 +3,14 @@ import type { HonoEnv } from '../../types/hono'
 
 import { Hono } from 'hono'
 
-import { authGuard } from '../../middlewares/auth'
-
 /**
  * User-facing Voice Pack routes.
  *
- * Mounted at `/api/v1/voice-packs`. Only enabled packs are exposed so disabled
- * curated entries remain available to historical character snapshots but cannot
- * be newly selected.
+ * Mounted at `/api/v1/voice-packs`. Only enabled packs are exposed; the route is
+ * read-only and does not require an account.
  */
 export function createVoicePackRoutes(service: VoicePackService) {
   return new Hono<HonoEnv>()
-    .use('*', authGuard)
     .get('/', async (c) => {
       const packs = await service.listEnabled()
       return c.json(packs)

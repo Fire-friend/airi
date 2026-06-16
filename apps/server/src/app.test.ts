@@ -3,28 +3,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { buildApp } from './app'
 
 function createTestDeps() {
-  const authServerMetadata = {
-    issuer: 'http://localhost:3000/api/auth',
-    authorization_endpoint: 'http://localhost:3000/api/auth/oauth2/authorize',
-    token_endpoint: 'http://localhost:3000/api/auth/oauth2/token',
-  }
-
-  const openIdConfig = {
-    issuer: 'http://localhost:3000/api/auth',
-    jwks_uri: 'http://localhost:3000/api/auth/jwks',
-    authorization_endpoint: 'http://localhost:3000/api/auth/oauth2/authorize',
-    token_endpoint: 'http://localhost:3000/api/auth/oauth2/token',
-  }
-
-  const auth = {
-    api: {
-      getSession: vi.fn(async () => null),
-      getOAuthServerConfig: vi.fn(async () => authServerMetadata),
-      getOpenIdConfig: vi.fn(async () => openIdConfig),
-    },
-    handler: vi.fn(async () => new Response('not-found', { status: 404 })),
-  } as any
-
   const redisSubscriber = {
     on: vi.fn(),
     subscribe: vi.fn(async () => 1),
@@ -33,49 +11,48 @@ function createTestDeps() {
 
   const redis = {
     duplicate: vi.fn(() => redisSubscriber),
+    ping: vi.fn(async () => 'PONG'),
     publish: vi.fn(async () => 0),
   }
 
   const deps = {
-    auth,
-    db: {} as any,
-    characterService: {} as any,
-    chatService: {} as any,
-    providerService: {} as any,
-    fluxService: {} as any,
-    fluxTransactionService: {} as any,
-    stripeService: {} as any,
-    billingService: {} as any,
-    adminFluxGrantsService: {} as any,
-    adminRouterConfigService: {} as any,
-    adminUsersService: {} as any,
-    ttsMeter: {} as any,
-    requestLogService: {} as any,
-    voicePackService: {} as any,
+    db: {
+      execute: vi.fn(async () => []),
+    } as any,
+    characterService: {
+      findById: vi.fn(async () => undefined),
+    } as any,
+    requestLogService: {
+      logRequest: vi.fn(async () => undefined),
+    } as any,
+    voicePackService: {
+      listEnabled: vi.fn(async () => []),
+      listEnabledForTtsModel: vi.fn(async () => []),
+    } as any,
     productEventService: {
       track: vi.fn(async () => undefined),
       countDistinctUsersByFeature: vi.fn(async () => []),
     },
+    adminRouterConfigService: {
+      current: vi.fn(async () => ({ request: { mode: 'merge', slices: [], defaults: {} }, preview: {}, loadedAt: 'now', missingKeys: [] })),
+      apply: vi.fn(async () => ({ applied: [], invalidatedKeys: [], preview: {} })),
+    } as any,
     configKV: {
-      getOrThrow: vi.fn(async (key: string) => {
-        switch (key) {
-          case 'AUTH_RATE_LIMIT_MAX':
-            return 20
-          case 'AUTH_RATE_LIMIT_WINDOW_SEC':
-            return 60
-          default:
-            throw new Error(`Unexpected config key: ${key}`)
-        }
-      }),
+      getOrThrow: vi.fn(async () => 'chat-auto'),
+      getOptional: vi.fn(async () => null),
     } as any,
     redis: redis as any,
     env: {
+      ADDITIONAL_TRUSTED_ORIGINS: [],
       API_SERVER_URL: 'http://localhost:3000',
+      HOST: '127.0.0.1',
+      OTEL_SERVICE_NAME: 'server-test',
+      PORT: 3000,
     } as any,
     otel: null,
-    userDeletionService: {} as any,
     llmRouter: {
       route: vi.fn(async () => new Response('{}', { status: 200 })),
+      routeTts: vi.fn(async () => new Response('audio', { status: 200 })),
       invalidateConfig: vi.fn(),
     } as any,
     envelopeCrypto: {
@@ -84,39 +61,35 @@ function createTestDeps() {
     } as any,
   }
 
-  return {
-    deps,
-    auth,
-    authServerMetadata,
-    openIdConfig,
-    redis,
-  }
+  return { deps, redis }
 }
 
-describe('app well-known metadata routes', () => {
-  it('serves oauth authorization server metadata at the root well-known path', async () => {
-    const { deps, auth, authServerMetadata } = createTestDeps()
+describe('app thin proxy routes', () => {
+  it('serves the API identity without auth metadata', async () => {
+    const { deps } = createTestDeps()
     const { app } = await buildApp(deps)
 
-    const res = await app.request('/.well-known/oauth-authorization-server/api/auth')
+    const res = await app.request('/')
 
     expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toContain('application/json')
-    expect(await res.json()).toEqual(authServerMetadata)
-    expect(auth.api.getOAuthServerConfig).toHaveBeenCalledTimes(1)
-    expect(auth.api.getOpenIdConfig).not.toHaveBeenCalled()
+    expect(await res.json()).toMatchObject({
+      service: 'airi-api',
+      mode: 'unauthenticated-proxy',
+    })
   })
 
-  it('serves openid configuration at the issuer-appended well-known path', async () => {
-    const { deps, auth, openIdConfig } = createTestDeps()
+  it('checks readiness with database and redis only', async () => {
+    const { deps, redis } = createTestDeps()
     const { app } = await buildApp(deps)
 
-    const res = await app.request('/api/auth/.well-known/openid-configuration')
+    const res = await app.request('/readyz')
 
     expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toContain('application/json')
-    expect(await res.json()).toEqual(openIdConfig)
-    expect(auth.api.getOpenIdConfig).toHaveBeenCalledTimes(1)
-    expect(auth.api.getOAuthServerConfig).not.toHaveBeenCalled()
+    expect(await res.json()).toMatchObject({
+      status: 'ready',
+      checks: { db: 'ok', redis: 'ok' },
+    })
+    expect(deps.db.execute).toHaveBeenCalledWith('SELECT 1')
+    expect(redis.ping).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,7 +1,5 @@
 import type { GenAiMetrics } from '../../../otel'
 import type { ConfigKVService } from '../../adapters/config-kv'
-import type { FluxMeter } from '../billing/flux-meter'
-import type { FluxService } from '../flux'
 import type { LlmRouterService } from '../llm-router'
 import type { startTtsGeneration, TtsGenerationTrace } from '../llm-tracing'
 import type { ProductEventService } from '../product-events'
@@ -11,10 +9,9 @@ import type { VoicePackService } from '../voice-packs'
 import { useLogger } from '@guiiai/logg'
 import { context, SpanStatusCode, trace } from '@opentelemetry/api'
 
-import { ApiError, createBadRequestError, createPaymentRequiredError } from '../../../utils/error'
+import { ApiError, createBadRequestError } from '../../../utils/error'
 import { nanoid } from '../../../utils/id'
 import {
-  AIRI_ATTR_BILLING_FLUX_CONSUMED,
   AIRI_ATTR_GEN_AI_OPERATION_KIND,
   GEN_AI_ATTR_REQUEST_MODEL,
 } from '../../../utils/observability'
@@ -42,10 +39,8 @@ function readOptionalNumber(record: Record<string, unknown> | undefined, key: st
 }
 
 export interface OpenAiSpeechServiceDeps {
-  fluxService: FluxService
   configKV: ConfigKVService
   requestLogService: RequestLogService
-  ttsMeter: FluxMeter
   llmRouter: LlmRouterService
   voicePackService: VoicePackService
   productEventService: ProductEventService
@@ -73,13 +68,11 @@ interface TtsAnalyticsContext {
  * Runs the OpenAI-shaped text-to-speech gateway flow.
  *
  * Use when:
- * - The HTTP route has parsed an authenticated `/audio/speech` request and
- *   needs domain orchestration for billing, routing, tracing, and logging.
+ * - The HTTP route has parsed a `/audio/speech` request and needs domain
+ *   orchestration for routing, tracing, and logging.
  *
  * Expects:
  * - `body` is the parsed JSON request body.
- * - Auth and route guards have already run.
- *
  * Returns:
  * - A gateway `Response` with safe upstream headers and audio body.
  */
@@ -100,7 +93,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       voice: typeof input.body.voice === 'string' ? input.body.voice : undefined,
       voicePackService: deps.voicePackService,
     })
-    const billingUnits = Math.ceil(inputText.length * voicePackRequest.costMultiplier)
 
     logger.withFields({
       requestId,
@@ -122,43 +114,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
         trigger: analytics.trigger,
       },
     })
-
-    const flux = await deps.fluxService.getFlux(input.userId)
-    try {
-      await deps.ttsMeter.assertCanAfford(input.userId, billingUnits, flux.flux)
-    }
-    catch (err) {
-      if (!(err instanceof ApiError) || err.statusCode !== 402)
-        throw err
-
-      void deps.productEventService.track({
-        userId: input.userId,
-        feature: 'tts',
-        action: 'speech_blocked',
-        status: 'blocked',
-        source: analytics.source,
-        model: requestModel,
-        reason: 'insufficient_balance',
-        metadata: {
-          input_chars: inputText.length,
-          billing_units: billingUnits,
-          balance_state: 'insufficient',
-          trigger: analytics.trigger,
-        },
-      })
-      logger.withError(err).withFields({
-        requestId,
-        userId: input.userId,
-        model: requestModel,
-        trigger: analytics.trigger,
-        source: analytics.source,
-      }).warn('tts speech blocked by pre-flight balance check')
-
-      if (analytics.trigger === 'auto')
-        return new Response(null, { status: 204 })
-
-      throw createPaymentRequiredError('Insufficient flux')
-    }
 
     const ttsInput = {
       text: inputText,
@@ -201,7 +156,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       generationTrace.fail(failure.message)
       recordMetrics({
         durationMs: Date.now() - startedAt,
-        fluxConsumed: 0,
         model: requestModel,
         provider: routeCtx.provider,
         status: failure.status,
@@ -231,7 +185,7 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       span.setStatus({ code: SpanStatusCode.ERROR, message: `Gateway ${response.status}` })
       span.end()
       generationTrace.fail(`Gateway ${response.status}`)
-      recordMetrics({ model: requestModel, status: response.status, provider: routeCtx.provider, durationMs, fluxConsumed: 0 })
+      recordMetrics({ model: requestModel, status: response.status, provider: routeCtx.provider, durationMs })
       void deps.productEventService.track({
         userId: input.userId,
         feature: 'tts',
@@ -255,32 +209,14 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       })
     }
 
-    let fluxConsumed = 0
-    try {
-      const result = await deps.ttsMeter.accumulate({
-        userId: input.userId,
-        units: billingUnits,
-        currentBalance: flux.flux,
-        requestId,
-        metadata: { model: requestModel, costMultiplier: voicePackRequest.costMultiplier },
-      })
-      fluxConsumed = result.fluxDebited
-      span.setAttribute(AIRI_ATTR_BILLING_FLUX_CONSUMED, fluxConsumed)
-      generationTrace.succeed({
-        inputChars: inputText.length,
-        fluxConsumed,
-        output: { contentType: response.headers.get('content-type') },
-      })
-    }
-    catch (err) {
-      generationTrace.fail('TTS billing failed')
-      throw err
-    }
-    finally {
-      span.end()
-    }
+    generationTrace.succeed({
+      inputChars: inputText.length,
+      fluxConsumed: 0,
+      output: { contentType: response.headers.get('content-type') },
+    })
+    span.end()
 
-    recordMetrics({ model: requestModel, status: response.status, provider: routeCtx.provider, durationMs, fluxConsumed })
+    recordMetrics({ model: requestModel, status: response.status, provider: routeCtx.provider, durationMs })
     void deps.productEventService.track({
       userId: input.userId,
       feature: 'tts',
@@ -292,10 +228,8 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       metadata: {
         http_status: response.status,
         input_chars: inputText.length,
-        billing_units: billingUnits,
         cost_multiplier: voicePackRequest.costMultiplier,
         duration_ms: durationMs,
-        flux_consumed: fluxConsumed,
         trigger: analytics.trigger,
       },
     })
@@ -304,7 +238,7 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       model: requestModel,
       status: response.status,
       durationMs,
-      fluxConsumed,
+      fluxConsumed: 0,
     }).catch(err => logger.withError(err).warn('Failed to write llm_request_log row'))
 
     logger.withFields({
@@ -314,7 +248,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
       status: response.status,
       durationMs,
       inputChars: inputText.length,
-      fluxConsumed,
     }).log('tts speech delivered')
 
     return new Response(response.body, {
@@ -328,7 +261,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
     status: number
     provider: string
     durationMs: number
-    fluxConsumed: number
   }): void {
     const attrs = {
       [GEN_AI_ATTR_REQUEST_MODEL]: input.model,
@@ -338,7 +270,6 @@ export function createOpenAiSpeechService(deps: OpenAiSpeechServiceDeps) {
     }
     deps.genAi?.operationCount.add(1, attrs)
     deps.genAi?.operationDuration.record(input.durationMs / 1000, attrs)
-    deps.genAi?.fluxConsumed.add(input.fluxConsumed, attrs)
   }
 
   return { handleSpeechRequest }
@@ -396,7 +327,7 @@ async function resolveVoicePackCostMultiplier(
   if (packId == null && value == null)
     return 1
   if (typeof packId !== 'string' || !packId.trim())
-    throw createBadRequestError('voice_pack.pack_id is required when Voice Pack billing metadata is provided', 'INVALID_VOICE_PACK')
+    throw createBadRequestError('voice_pack.pack_id is required when Voice Pack metadata is provided', 'INVALID_VOICE_PACK')
 
   const pack = await context.voicePackService.findById(packId)
   if (!pack)

@@ -20,8 +20,8 @@ export const character = pgTable(
     // TODO: json patch?
 
     // NOTICE: bare creatorId / ownerId is intentional — no FK to user.id.
-    // better-auth hard-deletes the user row; a cascade would wipe these
-    // soft-delete archive rows.
+    // A legacy account cleanup can remove the owner row; a cascade would wipe
+    // these soft-delete archive rows.
     // See `apps/server/docs/ai-context/account-deletion.md`.
     creatorId: text('creator_id').notNull(),
     ownerId: text('owner_id').notNull(),
@@ -109,13 +109,8 @@ export const characterI18n = pgTable(
     description: text('description').notNull(),
     tags: text('tags').array().notNull(),
 
-    // TODO: Implement the system prompt
-    // systemPrompt: text('system_prompt').notNull(),
-    // TODO: Implement the personality
-    // personality: text('personality').notNull(),
-
-    // TODO: Implement the initial memories
-    // initialMemories: text('initial_memories').array().notNull(),
+    // System prompt, personality, and memory text are stored in
+    // character_prompts so prompt variants can stay language-scoped.
 
     // TODO: greetings?
     // TODO: notes?
@@ -130,7 +125,7 @@ export const characterI18n = pgTable(
 export type CharacterI18n = InferSelectModel<typeof characterI18n>
 export type NewCharacterI18n = InferInsertModel<typeof characterI18n>
 
-type PromptType = 'system' | 'personality' | 'greetings'
+export type CharacterPromptType = 'system' | 'personality' | 'memory' | 'memories' | 'greetings'
 
 export const characterPrompts = pgTable(
   'character_prompts',
@@ -139,7 +134,7 @@ export const characterPrompts = pgTable(
     characterId: text('character_id').notNull().references(() => character.id, { onDelete: 'cascade' }),
 
     language: text('language').notNull(),
-    type: text('type').notNull().$type<PromptType>(),
+    type: text('type').notNull().$type<CharacterPromptType>(),
     content: text('content').notNull(),
   },
 )

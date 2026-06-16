@@ -1,5 +1,4 @@
 import type { GenAiMetrics } from '../../../../otel'
-import type { UsageInfo } from '../../../../services/domain/billing/billing'
 import type { LlmRouteContext } from '../../../../services/domain/llm-router'
 import type { RequestLogService } from '../../../../services/domain/request-log'
 
@@ -7,7 +6,6 @@ import { useLogger } from '@guiiai/logg'
 import { context, SpanStatusCode, trace } from '@opentelemetry/api'
 
 import {
-  AIRI_ATTR_BILLING_FLUX_CONSUMED,
   AIRI_ATTR_GEN_AI_OPERATION_KIND,
   AIRI_ATTR_GEN_AI_STREAM,
   AIRI_ATTR_GEN_AI_STREAM_INTERRUPTED,
@@ -20,6 +18,11 @@ import {
 export const tracer = trace.getTracer('v1-completions')
 
 export type GatewaySpan = ReturnType<typeof tracer.startSpan>
+
+export interface UsageInfo {
+  promptTokens?: number
+  completionTokens?: number
+}
 
 export interface OperationMetricsInput extends UsageInfo {
   model: string
@@ -81,7 +84,6 @@ export function createRouteTelemetry(deps: {
     const attrs = getLlmMetricAttributes(opts)
     deps.genAi.operationCount.add(1, attrs)
     deps.genAi.operationDuration.record(opts.durationMs / 1000, attrs)
-    deps.genAi.fluxConsumed.add(opts.fluxConsumed, attrs)
     if (opts.promptTokens != null)
       deps.genAi.tokenUsageInput.add(opts.promptTokens, attrs)
     if (opts.completionTokens != null)
@@ -131,16 +133,11 @@ export function createRouteTelemetry(deps: {
     span.end()
   }
 
-  function recordUsageOnSpan(span: GatewaySpan, input: UsageInfo & { fluxConsumed: number }): void {
+  function recordUsageOnSpan(span: GatewaySpan, input: UsageInfo): void {
     span.setAttributes({
       [GEN_AI_ATTR_USAGE_INPUT_TOKENS]: input.promptTokens ?? 0,
       [GEN_AI_ATTR_USAGE_OUTPUT_TOKENS]: input.completionTokens ?? 0,
-      [AIRI_ATTR_BILLING_FLUX_CONSUMED]: input.fluxConsumed,
     })
-  }
-
-  function recordTtsBillingOnSpan(span: GatewaySpan, fluxConsumed: number): void {
-    span.setAttribute(AIRI_ATTR_BILLING_FLUX_CONSUMED, fluxConsumed)
   }
 
   function recordFirstToken(input: {
@@ -178,7 +175,6 @@ export function createRouteTelemetry(deps: {
     recordMetrics,
     recordRequestLog,
     recordStreamInterrupted,
-    recordTtsBillingOnSpan,
     recordUsageOnSpan,
     runWithSpan,
     setHttpStatus,

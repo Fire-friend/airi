@@ -20,8 +20,6 @@ import {
   variant,
 } from 'valibot'
 
-import { adminGuard } from '../../../../middlewares/admin-guard'
-import { authGuard } from '../../../../middlewares/auth'
 import { createBadRequestError } from '../../../../utils/error'
 
 /**
@@ -211,14 +209,10 @@ export function createAdminRouterConfigRoutes(
   service: AdminRouterConfigService,
 ) {
   return new Hono<HonoEnv>()
-    .use('*', authGuard)
-    .use('*', adminGuard)
     .get('/', async (c) => {
       return c.json(await service.current())
     })
     .post('/', async (c) => {
-      const user = c.get('user')!
-
       const raw = await c.req.json().catch(() => null)
       if (raw == null)
         throw createBadRequestError('Request body must be JSON', 'INVALID_BODY')
@@ -245,7 +239,7 @@ export function createAdminRouterConfigRoutes(
         dryRun: body.dryRun,
         slices: body.slices as SliceInput[],
         defaults: body.defaults,
-        actorUserId: user.id,
+        actorUserId: 'anonymous',
       })
 
       return c.json(result)

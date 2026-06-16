@@ -1,13 +1,14 @@
 # `@proj-airi/server`
 
-HTTP and WebSocket backend for AIRI. This app owns auth, billing, chat synchronization, gateway forwarding, and server-side observability export.
+HTTP and WebSocket backend for AIRI. This app is now a thin unauthenticated GenAI gateway for remote APIs, local models, or vLLM-compatible backends, plus server-side observability export.
 
 ## What It Does
 
 - Serves the Hono-based API and WebSocket endpoints.
-- Uses Postgres as the source of truth for users, billing, and durable state.
+- Uses Postgres for durable configuration, character metadata, request logs, and product events.
 - Uses Redis for cache, KV, Pub/Sub, and Streams.
-- Forwards GenAI requests to the configured upstream gateway and records billing from usage.
+- Forwards OpenAI-compatible chat and TTS requests to the configured upstream gateway.
+- Applies persisted character prompt fragments to chat completion requests when a character id is supplied.
 - Exports traces, metrics, and logs through OpenTelemetry.
 
 ## How To Use It
@@ -25,26 +26,6 @@ For local observability infrastructure, use:
 ```sh
 docker compose -f apps/server/docker-compose.otel.yml up -d
 ```
-
-## `AUTH_UI_URL`
-
-`apps/ui-server-auth` is deployed separately from the server image. The API server still owns the historical `/auth/*` entrypoints and redirects them to **`AUTH_UI_URL`**.
-
-Default:
-
-`AUTH_UI_URL=https://accounts.airi.build/ui`
-
-Set this when previewing or deploying auth UI to a different Cloudflare URL.
-
-## `ADMIN_UI_URL`
-
-`apps/ui-admin` is deployed separately from the server image. The API server still owns the historical `/admin/*` entrypoints and redirects them to **`ADMIN_UI_URL`**.
-
-Default:
-
-`ADMIN_UI_URL=https://admin.airi.build`
-
-Set this when previewing or deploying admin UI to a different Cloudflare URL.
 
 ## `ADDITIONAL_TRUSTED_ORIGINS` (LAN / Capacitor dev)
 

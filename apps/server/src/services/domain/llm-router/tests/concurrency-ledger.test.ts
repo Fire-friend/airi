@@ -7,7 +7,7 @@ import { createConcurrencyLedger } from '../concurrency-ledger'
 // NOTICE: Mimic the subset of Redis semantics the ledger uses (EVAL for the
 // ACQUIRE/RELEASE Lua, plus SET/EXISTS/GET/SADD/SMEMBERS/MGET). The two Lua
 // scripts are told apart by numKeys (acquire passes 2 keys, release passes 1) —
-// same approach flux-meter.test.ts uses for its single script. Real Lua
+// same single-script approach the production Redis path uses. Real Lua
 // atomicity is exercised by ioredis hitting Redis in integration; here we verify
 // the capacity decision, floor-guarded release, saturation flags, and snapshot.
 function createMockRedis() {

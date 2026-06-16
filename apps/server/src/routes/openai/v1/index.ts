@@ -3,14 +3,14 @@ import type { Context } from 'hono'
 import type { HonoEnv } from '../../../types/hono'
 import type { LlmTracingDeps, V1RouteDeps } from './types'
 
-import { authGuard } from '../../../middlewares/auth'
-import { configGuard } from '../../../middlewares/config-guard'
 import { createV1Gateway } from './gateway'
 import { chatCompletionsRateLimit } from './middlewares'
 import { chatCompletions } from './operations/chat-completions'
 import { createSpeechCatalogOperation } from './operations/speech-catalog'
 import { speechGeneration } from './operations/speech-generation'
 import { defaultLlmTracing } from './types'
+
+const ANONYMOUS_USER_ID = 'anonymous'
 
 export interface CreateV1RoutesDeps extends Omit<V1RouteDeps, 'llmTracing'> {
   llmTracing?: LlmTracingDeps
@@ -19,9 +19,6 @@ export interface CreateV1RoutesDeps extends Omit<V1RouteDeps, 'llmTracing'> {
 export function createV1Routes(input: CreateV1RoutesDeps) {
   const deps: V1RouteDeps = { ...input, llmTracing: input.llmTracing ?? defaultLlmTracing }
   const gateway = createV1Gateway(deps)
-    .useHono('*', '*', authGuard)
-    .useHono('openai', '/chat/*', configGuard(deps.configKV, ['FLUX_PER_REQUEST'], 'Service is not available yet'))
-    .useHono('audio', '/speech', configGuard(deps.configKV, ['FLUX_PER_1K_CHARS_TTS'], 'TTS service is not available yet'))
 
   // OpenAI-compatible surface (mounted at /api/v1/openai). Only routes that
   // mirror an actual OpenAI public endpoint belong here. Audio used to live
@@ -35,11 +32,10 @@ export function createV1Routes(input: CreateV1RoutesDeps) {
     .post('/chat/completions', openai.handler(
       'chat.completions',
       async (c) => {
-        const user = c.get('user')!
         const body = await c.req.json() as Record<string, unknown>
 
         return {
-          userId: user.id,
+          userId: ANONYMOUS_USER_ID,
           body,
           sessionId: c.req.header('x-airi-session-id'),
           abortSignal: c.req.raw.signal,
@@ -60,11 +56,10 @@ export function createV1Routes(input: CreateV1RoutesDeps) {
     .post('/speech', audio.handler(
       'speech.generate',
       async (c) => {
-        const user = c.get('user')!
         const body = await c.req.json() as Record<string, unknown>
 
         return {
-          userId: user.id,
+          userId: ANONYMOUS_USER_ID,
           body,
           sessionId: c.req.header('x-airi-session-id'),
           abortSignal: c.req.raw.signal,

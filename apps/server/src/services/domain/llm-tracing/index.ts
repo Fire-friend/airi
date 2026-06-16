@@ -40,7 +40,7 @@ function tracingActive(): boolean {
  * deltas, usage-only chunks, blank/comment lines, or malformed JSON. The upstream
  * SSE is an external boundary, so per-line JSON parsing is tolerated and a parse
  * failure degrades to "this line added no text" rather than aborting capture:
- * output is best-effort trace data, not billing.
+ * output is best-effort trace data.
  */
 function extractSseDeltaText(sseLine: string): string {
   const trimmed = sseLine.trimStart()
@@ -65,13 +65,13 @@ interface GenerationInput {
   input: unknown
   /** Resolved upstream model id (after `auto` aliases are replaced). */
   model: string
-  /** Correlation id shared with billing / request-log rows. */
+  /** Correlation id shared with request-log rows. */
   requestId: string
   /** Generation name shown in Langfuse. */
   name: string
   /** Extra observation metadata. */
   metadata?: Record<string, unknown>
-  /** Billing/identity owner of the request. Lifted to trace-level `userId`. */
+  /** Actor associated with the request. Lifted to trace-level `userId`. */
   userId: string
   /** Client-supplied conversation id (`x-airi-session-id`). Absent → user-only attribution. */
   sessionId?: string
@@ -96,7 +96,7 @@ export interface TtsGenerationInput extends Omit<GenerationInput, 'name' | 'meta
   }
 }
 
-/** Terminal usage/cost figures recorded when a generation completes successfully. */
+/** Terminal usage figures recorded when a generation completes successfully. */
 interface GenerationResult {
   /**
    * Explicit completion to record. Omit for streaming requests to use the
@@ -105,13 +105,13 @@ interface GenerationResult {
   output?: unknown
   /** Usage dimensions for Langfuse. For chat this is token counts; for TTS this is character count. */
   usageDetails?: Record<string, number>
-  /** AIRI business cost (flux). Stored in generation metadata, not `costDetails`. */
+  /** Legacy credit field. This proxy records it as 0. */
   fluxConsumed?: number
   /** Additional terminal metadata to merge with request metadata. */
   metadata?: Record<string, unknown>
 }
 
-/** Terminal usage/cost figures recorded when a chat generation completes successfully. */
+/** Terminal usage figures recorded when a chat generation completes successfully. */
 export interface ChatGenerationResult {
   /**
    * Explicit completion to record. Omit for streaming requests to use the
@@ -120,17 +120,17 @@ export interface ChatGenerationResult {
   output?: unknown
   promptTokens?: number
   completionTokens?: number
-  /** AIRI business cost (flux). Stored in generation metadata, not `costDetails`. */
+  /** Legacy credit field. This proxy records it as 0. */
   fluxConsumed?: number
 }
 
-/** Terminal usage/cost figures recorded when a TTS generation completes successfully. */
+/** Terminal usage figures recorded when a TTS generation completes successfully. */
 export interface TtsGenerationResult {
   /** Output metadata only; binary audio is not buffered into Langfuse. */
   output?: unknown
-  /** Input character count charged by the TTS flux meter. */
+  /** Input character count recorded for TTS usage analysis. */
   inputChars: number
-  /** AIRI business cost (flux). Stored in generation metadata, not `costDetails`. */
+  /** Legacy credit field. This proxy records it as 0. */
   fluxConsumed?: number
   /** Additional terminal metadata to merge with request metadata. */
   metadata?: Record<string, unknown>

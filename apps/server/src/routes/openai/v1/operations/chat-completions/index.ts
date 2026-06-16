@@ -1,18 +1,22 @@
-import type { UsageInfo } from '../../../../../services/domain/billing/billing'
 import type { GatewayCallback } from '../../gateway'
 import type { V1RouteDeps } from '../../types'
 
 import { useLogger } from '@guiiai/logg'
 
-import { extractUsageFromBody } from '../../../../../services/domain/billing/billing'
+import { createBadRequestError, createNotFoundError } from '../../../../../utils/error'
 import { nanoid } from '../../../../../utils/id'
 import { buildSafeResponseHeaders } from '../../http/response'
-import { createOpenAiRouteBilling } from '../../middlewares/billing'
 import { createRouteTelemetry, newRouteContext } from '../../middlewares/telemetry'
 
-type ChatBilling = ReturnType<typeof createOpenAiRouteBilling>
-type ChatBillingPolicy = Awaited<ReturnType<ChatBilling['authorizeChat']>>
+interface UsageInfo {
+  promptTokens?: number
+  completionTokens?: number
+}
+
 type RouteTelemetry = ReturnType<typeof createRouteTelemetry>
+type CharacterForPrompt = NonNullable<Awaited<ReturnType<V1RouteDeps['characterService']['findById']>>>
+type CharacterI18nForPrompt = CharacterForPrompt['i18n'][number]
+type CharacterPromptForPrompt = CharacterForPrompt['prompts'][number]
 
 export interface ChatCompletionsOperationRequest {
   userId: string
@@ -21,30 +25,140 @@ export interface ChatCompletionsOperationRequest {
   abortSignal?: AbortSignal
 }
 
+function extractUsageFromBody(body: unknown): UsageInfo {
+  if (typeof body !== 'object' || body == null)
+    return {}
+
+  const usage = (body as { usage?: Record<string, unknown> }).usage
+  if (!usage)
+    return {}
+
+  const promptTokens = usage.prompt_tokens
+  const completionTokens = usage.completion_tokens
+  return {
+    promptTokens: typeof promptTokens === 'number' ? promptTokens : undefined,
+    completionTokens: typeof completionTokens === 'number' ? completionTokens : undefined,
+  }
+}
+
+function readOptionalRequestString(body: Record<string, unknown>, ...fieldNames: string[]): string | undefined {
+  const fieldName = fieldNames.find(name => body[name] != null)
+  if (!fieldName)
+    return undefined
+
+  const value = body[fieldName]
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw createBadRequestError(`Invalid ${fieldName}`, 'INVALID_REQUEST', {
+      field: fieldName,
+      expected: 'non-empty string',
+    })
+  }
+
+  return value.trim()
+}
+
+function selectLocalizedRows<T extends { language: string }>(rows: T[], language?: string): T[] {
+  if (!language)
+    return rows
+
+  const exact = rows.filter(row => row.language === language)
+  return exact.length > 0 ? exact : rows
+}
+
+function selectPrimaryI18n(character: CharacterForPrompt, requestedLanguage?: string): CharacterI18nForPrompt | undefined {
+  return selectLocalizedRows(character.i18n, requestedLanguage)[0]
+}
+
+function appendPromptSection(parts: string[], title: string, prompts: CharacterPromptForPrompt[]) {
+  const content = prompts
+    .map(prompt => prompt.content.trim())
+    .filter(Boolean)
+
+  if (content.length === 0)
+    return
+
+  parts.push(`${title}:\n${content.join('\n\n')}`)
+}
+
+function buildCharacterSystemMessage(character: CharacterForPrompt, requestedLanguage?: string): string | null {
+  const i18n = selectPrimaryI18n(character, requestedLanguage)
+  const promptLanguage = requestedLanguage ?? i18n?.language ?? character.prompts[0]?.language
+  const prompts = selectLocalizedRows(character.prompts, promptLanguage)
+  const parts: string[] = []
+
+  if (i18n) {
+    const profile = [
+      `Name: ${i18n.name}`,
+      i18n.tagline ? `Tagline: ${i18n.tagline}` : undefined,
+      `Description: ${i18n.description}`,
+      i18n.tags.length > 0 ? `Tags: ${i18n.tags.join(', ')}` : undefined,
+    ].filter(Boolean)
+
+    parts.push(`Character profile:\n${profile.join('\n')}`)
+  }
+
+  appendPromptSection(parts, 'System prompt', prompts.filter(prompt => prompt.type === 'system'))
+  appendPromptSection(parts, 'Personality', prompts.filter(prompt => prompt.type === 'personality'))
+  appendPromptSection(parts, 'Memories', prompts.filter(prompt => prompt.type === 'memory' || prompt.type === 'memories'))
+
+  if (parts.length === 0)
+    return null
+
+  return parts.join('\n\n')
+}
+
+async function applyCharacterContext(body: Record<string, unknown>, characterService: V1RouteDeps['characterService']): Promise<Record<string, unknown>> {
+  const characterId = readOptionalRequestString(body, 'characterId', 'character_id')
+  if (!characterId)
+    return body
+
+  const language = readOptionalRequestString(body, 'characterLanguage', 'character_language')
+  const messages = body.messages
+  if (!Array.isArray(messages)) {
+    throw createBadRequestError('characterId requires messages to be an array', 'INVALID_REQUEST', {
+      field: 'messages',
+    })
+  }
+
+  const character = await characterService.findById(characterId)
+  if (!character)
+    throw createNotFoundError('Character not found', { characterId })
+
+  const systemMessage = buildCharacterSystemMessage(character, language)
+  const upstreamBody = { ...body }
+  delete upstreamBody.characterId
+  delete upstreamBody.character_id
+  delete upstreamBody.characterLanguage
+  delete upstreamBody.character_language
+
+  if (!systemMessage)
+    return upstreamBody
+
+  return {
+    ...upstreamBody,
+    messages: [
+      { role: 'system', content: systemMessage },
+      ...messages,
+    ],
+  }
+}
+
 export function chatCompletions(deps: V1RouteDeps): GatewayCallback<'chat.completions'> {
   const logger = useLogger('v1-completions').useGlobalConfig()
   const telemetry = createRouteTelemetry({
     genAi: deps.genAi,
     requestLogService: deps.requestLogService,
   })
-  const billing = createOpenAiRouteBilling(deps)
 
   return async (context) => {
     const input = context.input
-    // Generated up-front so incoming, completion, partial-debit, debit-failure,
-    // and request-log entries all carry the same correlation id. Re-used as
-    // the billing requestId (both streaming and non-streaming branches) for
-    // DB-level idempotency.
     const requestId = nanoid()
 
-    const billingPolicy = await billing.authorizeChat(input.userId)
-
-    const body = input.body
+    const body = await applyCharacterContext(input.body, deps.characterService)
     let requestModel = typeof body.model === 'string' && body.model.length > 0 ? body.model : 'auto'
 
-    if (requestModel === 'auto') {
+    if (requestModel === 'auto')
       requestModel = await deps.configKV.getOrThrow('DEFAULT_CHAT_MODEL')
-    }
 
     const stream = !!body.stream
     logger.withFields({
@@ -67,22 +181,8 @@ export function chatCompletions(deps: V1RouteDeps): GatewayCallback<'chat.comple
       },
     })
 
-    // Server-connection attrs come from the router (which knows the actual
-    // upstream baseURL it dispatched to) — it enriches the active span with
-    // its own `airi.gen_ai.gateway.*` attrs on success.
     const span = telemetry.startChatSpan({ model: requestModel, stream })
-
     const startedAt = Date.now()
-
-    // Router throws ApiError (502/503/504/400) on full exhaustion or unknown
-    // model. We do NOT catch here — global app.onError renders the ApiError
-    // shape. Span is closed inside the catch so failures show up in traces.
-    // NOTICE:
-    // Propagate the client disconnect signal so an upstream LLM call doesn't
-    // keep generating tokens (and burning paid upstream quota) after the
-    // caller hangs up. Without this the streaming-cancel path records
-    // fluxConsumed: 0 while real cost was incurred — a silent revenue leak.
-    // Source: codex review 2026-05-15 HIGH #1.
     const clientAbort = input.abortSignal
     const routeCtx = newRouteContext()
     let response: Response
@@ -121,12 +221,6 @@ export function chatCompletions(deps: V1RouteDeps): GatewayCallback<'chat.comple
     const durationMs = Date.now() - startedAt
     telemetry.setHttpStatus(span, response.status)
     const langfuseModel = routeCtx.upstreamModel ?? requestModel
-
-    // Langfuse LLM-native generation: per-request prompt/completion record
-    // (input/output/model/usage) powering prompt trace, eval, and per-user/
-    // session cost. Use the router-resolved upstream model, not the client
-    // alias (`auto` / `chat-auto`), so Langfuse model-cost grouping matches the
-    // provider model that actually generated the tokens.
     const generationTrace = deps.llmTracing.startChatGeneration({
       input: body.messages,
       model: langfuseModel,
@@ -176,8 +270,6 @@ export function chatCompletions(deps: V1RouteDeps): GatewayCallback<'chat.comple
         userId: input.userId,
         requestModel,
         routeCtxProvider: routeCtx.provider,
-        billing,
-        billingPolicy,
         telemetry,
         logger,
       })
@@ -193,8 +285,6 @@ export function chatCompletions(deps: V1RouteDeps): GatewayCallback<'chat.comple
       userId: input.userId,
       requestModel,
       routeCtxProvider: routeCtx.provider,
-      billing,
-      billingPolicy,
       telemetry,
       logger,
     })
@@ -212,27 +302,18 @@ function streamChatCompletion(input: {
   userId: string
   requestModel: string
   routeCtxProvider: string
-  billing: ChatBilling
-  billingPolicy: ChatBillingPolicy
   telemetry: RouteTelemetry
   logger: ReturnType<typeof useLogger>
 }) {
-  // Streaming: return response immediately, bill after stream ends
   const { readable, writable } = new TransformStream()
   const reader = input.response.body!.getReader()
   const writer = writable.getWriter()
   const decoder = new TextDecoder()
-  // Buffer last 2KB to handle chunk boundary splits for usage extraction
   let tailBuffer = ''
   let streamCompleted = false
   let streamInterrupted = false
-  // First-chunk timestamp for gen_ai.client.first_token.duration. Latched
-  // on the first byte from upstream — captures perceived "time to first
-  // token" for streaming clients. NaN until the first chunk lands so
-  // `Number.isFinite` gates the histogram record.
   let firstChunkAt = Number.NaN
 
-  // Process stream in background
   ;(async () => {
     try {
       while (true) {
@@ -253,8 +334,6 @@ function streamChatCompletion(input: {
         await writer.write(value)
         const text = decoder.decode(value, { stream: true })
         tailBuffer = (tailBuffer + text).slice(-2048)
-        // Accumulate the assistant completion for the Langfuse trace output
-        // (no-op when tracing is off). Module owns SSE parsing + the cap.
         input.generationTrace.appendStreamChunk(text)
       }
     }
@@ -314,57 +393,23 @@ function streamChatCompletion(input: {
             usage = extractUsageFromBody(json)
           }
         }
-        catch (err) { input.logger.withError(err).warn('Failed to extract usage from stream, falling back to flat rate') }
+        catch (err) { input.logger.withError(err).warn('Failed to extract usage from stream') }
 
-        const fluxConsumed = input.billing.priceChatUsage(usage, input.billingPolicy)
-
-        input.telemetry.recordUsageOnSpan(input.span, { ...usage, fluxConsumed })
+        input.telemetry.recordUsageOnSpan(input.span, usage)
         input.telemetry.endSpan(input.span)
-        // Streaming output comes from appendStreamChunk above, so succeed
-        // omits it and the module uses the assembled assistant text.
         input.generationTrace.succeed({
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
-          fluxConsumed,
+          fluxConsumed: 0,
         })
-        input.telemetry.recordMetrics({ model: input.requestModel, status: input.response.status, type: 'chat', provider: input.routeCtxProvider, durationMs: input.durationMs, fluxConsumed, ...usage })
-
-        // Debit flux via DB transaction (source of truth)
-        // NOTICE: streaming response is already sent, so we cannot reject on failure.
-        // Log at error level so unpaid usage is visible in monitoring/alerts.
-        //
-        // `consumeFluxForLLM` now drains to zero on partial balance instead
-        // of throwing — the catch path only fires on `balance <= 0` (post-
-        // race) or real DB errors. Partial debits are signalled via the
-        // returned `charged < requested` and accounted to the same
-        // `fluxUnbilled` counter (different `reason` label).
-        let actualCharged = 0
-        try {
-          actualCharged = await input.billing.settleChat({
-            userId: input.userId,
-            amount: fluxConsumed,
-            requestId: input.requestId,
-            model: input.requestModel,
-            stage: 'streaming',
-            logger: input.logger,
-            ...usage,
-          })
-        }
-        catch (err) {
-          // Real revenue leak: streaming response already sent (HTTP 200,
-          // tokens delivered), so this catch produces no 5xx and no DB
-          // latency spike on the request path. Without a dedicated counter,
-          // the failure is silent. Page on any sustained `increase()`.
-          input.billing.recordChatDebitFailure({ amount: fluxConsumed, model: input.requestModel, stage: 'streaming' })
-          input.logger.withError(err).withFields({ userId: input.userId, fluxConsumed, requestId: input.requestId }).error('Failed to debit flux after streaming — unpaid usage')
-        }
+        input.telemetry.recordMetrics({ model: input.requestModel, status: input.response.status, type: 'chat', provider: input.routeCtxProvider, durationMs: input.durationMs, fluxConsumed: 0, ...usage })
 
         input.telemetry.recordRequestLog({
           userId: input.userId,
           model: input.requestModel,
           status: input.response.status,
           durationMs: input.durationMs,
-          fluxConsumed: actualCharged,
+          fluxConsumed: 0,
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
         })
@@ -381,7 +426,6 @@ function streamChatCompletion(input: {
             duration_ms: input.durationMs,
             prompt_tokens: usage.promptTokens ?? 0,
             completion_tokens: usage.completionTokens ?? 0,
-            flux_consumed: actualCharged,
             stream: true,
           },
         })
@@ -394,7 +438,6 @@ function streamChatCompletion(input: {
           durationMs: input.durationMs,
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
-          fluxConsumed: actualCharged,
           stream: true,
         }).log('chat completion delivered')
       }
@@ -417,15 +460,9 @@ async function completeNonStreamingChat(input: {
   userId: string
   requestModel: string
   routeCtxProvider: string
-  billing: ChatBilling
-  billingPolicy: ChatBillingPolicy
   telemetry: RouteTelemetry
   logger: ReturnType<typeof useLogger>
 }) {
-  // Non-streaming: parse response, bill, then return.
-  // Parse failure (malformed upstream JSON) must close both span and the
-  // Langfuse generation before bubbling up — otherwise the trace leaks.
-  // Mirrors the error-branch shape used above (router throw / !response.ok).
   let responseBody
   try {
     responseBody = await input.response.json()
@@ -452,38 +489,23 @@ async function completeNonStreamingChat(input: {
     throw err
   }
   const usage = extractUsageFromBody(responseBody)
-  const fluxConsumed = input.billing.priceChatUsage(usage, input.billingPolicy)
 
-  input.telemetry.recordUsageOnSpan(input.span, { ...usage, fluxConsumed })
+  input.telemetry.recordUsageOnSpan(input.span, usage)
   input.telemetry.endSpan(input.span)
   input.generationTrace.succeed({
     output: responseBody,
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
-    fluxConsumed,
+    fluxConsumed: 0,
   })
-  input.telemetry.recordMetrics({ model: input.requestModel, status: input.response.status, type: 'chat', provider: input.routeCtxProvider, durationMs: input.durationMs, fluxConsumed, ...usage })
-
-  // Debit flux via DB transaction (source of truth).
-  // The upstream call has already happened (cost incurred), so partial
-  // debit + `fluxUnbilled` is the only sane recovery — same shape as the
-  // streaming path. `balance <= 0` still throws and bubbles up as 402.
-  const actualCharged = await input.billing.settleChat({
-    userId: input.userId,
-    amount: fluxConsumed,
-    requestId: input.requestId,
-    model: input.requestModel,
-    stage: 'non_streaming',
-    logger: input.logger,
-    ...usage,
-  })
+  input.telemetry.recordMetrics({ model: input.requestModel, status: input.response.status, type: 'chat', provider: input.routeCtxProvider, durationMs: input.durationMs, fluxConsumed: 0, ...usage })
 
   input.telemetry.recordRequestLog({
     userId: input.userId,
     model: input.requestModel,
     status: input.response.status,
     durationMs: input.durationMs,
-    fluxConsumed: actualCharged,
+    fluxConsumed: 0,
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
   })
@@ -500,7 +522,6 @@ async function completeNonStreamingChat(input: {
       duration_ms: input.durationMs,
       prompt_tokens: usage.promptTokens ?? 0,
       completion_tokens: usage.completionTokens ?? 0,
-      flux_consumed: actualCharged,
       stream: false,
     },
   })
@@ -513,7 +534,6 @@ async function completeNonStreamingChat(input: {
     durationMs: input.durationMs,
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
-    fluxConsumed: actualCharged,
     stream: false,
   }).log('chat completion delivered')
 

@@ -37,6 +37,7 @@ export function createCharacterService(db: Database, metrics?: EngagementMetrics
         ),
         with: {
           i18n: true,
+          prompts: true,
           capabilities: true,
           likes: true,
           bookmarks: true,
@@ -50,6 +51,7 @@ export function createCharacterService(db: Database, metrics?: EngagementMetrics
         where: isNull(schema.character.deletedAt),
         with: {
           i18n: true,
+          prompts: true,
           capabilities: true,
           likes: true,
           bookmarks: true,
