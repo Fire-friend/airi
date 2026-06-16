@@ -21,52 +21,37 @@ describe('configKVService', () => {
     service = createConfigKVService(redis as any)
   })
 
-  it('get should throw 503 when key is not set', async () => {
-    await expect(service.getOrThrow('FLUX_PER_1K_CHARS_TTS'))
+  it('get should throw 503 when a required key is not set', async () => {
+    await expect(service.getOrThrow('DEFAULT_CHAT_MODEL'))
       .rejects
       .toThrow('Service configuration is incomplete')
   })
 
-  it('get should return numeric value when key is set', async () => {
-    redis._store.set(configRedisKey('FLUX_PER_REQUEST'), '5')
+  it('get should return a string value when key is set', async () => {
+    redis._store.set(configRedisKey('DEFAULT_CHAT_MODEL'), JSON.stringify('local-vllm'))
 
-    const value = await service.getOrThrow('FLUX_PER_REQUEST')
-    expect(value).toBe(5)
+    const value = await service.getOrThrow('DEFAULT_CHAT_MODEL')
+    expect(value).toBe('local-vllm')
   })
 
-  it('get should read from correct prefixed key', async () => {
-    redis._store.set(configRedisKey('FLUX_PER_REQUEST'), '3')
+  it('get should read from the prefixed key', async () => {
+    redis._store.set(configRedisKey('DEFAULT_CHAT_MODEL'), JSON.stringify('local-vllm'))
 
-    await service.getOrThrow('FLUX_PER_REQUEST')
-    expect(redis.get).toHaveBeenCalledWith(configRedisKey('FLUX_PER_REQUEST'))
+    await service.getOrThrow('DEFAULT_CHAT_MODEL')
+    expect(redis.get).toHaveBeenCalledWith(configRedisKey('DEFAULT_CHAT_MODEL'))
   })
 
-  it('getOptional should return schema default when key has one', async () => {
-    const value = await service.getOptional('FLUX_PER_REQUEST')
-    expect(value).toBe(5)
-  })
-
-  it('getOptional should return null when required key is not set', async () => {
-    const value = await service.getOptional('FLUX_PER_1K_CHARS_TTS')
+  it('getOptional should return null when a required key is not set', async () => {
+    const value = await service.getOptional('DEFAULT_CHAT_MODEL')
     expect(value).toBeNull()
   })
 
-  it('getOptional should return numeric value when key is set', async () => {
-    redis._store.set(configRedisKey('INITIAL_USER_FLUX'), '200')
-
-    const value = await service.getOptional('INITIAL_USER_FLUX')
-    expect(value).toBe(200)
+  it('getOptional should return schema default when key has one', async () => {
+    const value = await service.getOptional('DEFAULT_TTS_VOICES')
+    expect(value).toEqual({})
   })
 
   it('getOptional should throw CONFIG_INVALID when Redis contains malformed JSON', async () => {
-    // ROOT CAUSE:
-    //
-    // If an operator edits config:LLM_ROUTER_CONFIG directly with invalid JSON,
-    // JSON.parse used to throw SyntaxError through the request handler and log
-    // it as an unhandled 500.
-    //
-    // We fixed this by translating stored config parse/validation failures into
-    // a stable API error at the configKV boundary.
     redis._store.set(configRedisKey('LLM_ROUTER_CONFIG'), '{"llm":{}')
 
     await expect(service.getOptional('LLM_ROUTER_CONFIG'))
@@ -78,9 +63,9 @@ describe('configKVService', () => {
   })
 
   it('getOptional should throw CONFIG_INVALID when Redis contains schema-invalid JSON', async () => {
-    redis._store.set(configRedisKey('FLUX_PER_REQUEST'), JSON.stringify('5'))
+    redis._store.set(configRedisKey('DEFAULT_CHAT_MODEL'), JSON.stringify(123))
 
-    await expect(service.getOptional('FLUX_PER_REQUEST'))
+    await expect(service.getOptional('DEFAULT_CHAT_MODEL'))
       .rejects
       .toMatchObject({
         statusCode: 503,
@@ -89,28 +74,9 @@ describe('configKVService', () => {
   })
 
   it('set should write value to Redis with prefix', async () => {
-    await service.set('FLUX_PER_REQUEST', 10)
+    await service.set('DEFAULT_CHAT_MODEL', 'local-vllm')
 
-    expect(redis.set).toHaveBeenCalledWith(configRedisKey('FLUX_PER_REQUEST'), '10')
-    expect(redis._store.get(configRedisKey('FLUX_PER_REQUEST'))).toBe('10')
-  })
-
-  it('set should reject invalid values for string config keys', async () => {
-    await expect(service.set('STRIPE_FLUX_PRODUCT_ID', { id: 'prod_123' } as any))
-      .rejects
-      .toThrow()
-  })
-
-  it('set then get should round-trip correctly', async () => {
-    await service.set('INITIAL_USER_FLUX', 500)
-
-    const value = await service.getOrThrow('INITIAL_USER_FLUX')
-    expect(value).toBe(500)
-  })
-
-  it('set should store string values as JSON strings', async () => {
-    await service.set('STRIPE_FLUX_PRODUCT_ID', 'prod_abc123')
-
-    expect(redis._store.get(configRedisKey('STRIPE_FLUX_PRODUCT_ID'))).toBe(JSON.stringify('prod_abc123'))
+    expect(redis.set).toHaveBeenCalledWith(configRedisKey('DEFAULT_CHAT_MODEL'), JSON.stringify('local-vllm'))
+    expect(redis._store.get(configRedisKey('DEFAULT_CHAT_MODEL'))).toBe(JSON.stringify('local-vllm'))
   })
 })

@@ -8,11 +8,6 @@ function baseEnv(): Record<string, string> {
   return {
     DATABASE_URL: 'postgres://example',
     REDIS_URL: 'redis://example',
-    BETTER_AUTH_SECRET: 'test-secret-at-least-32-characters-long',
-    AUTH_GOOGLE_CLIENT_ID: 'google-client',
-    AUTH_GOOGLE_CLIENT_SECRET: 'google-secret',
-    AUTH_GITHUB_CLIENT_ID: 'github-client',
-    AUTH_GITHUB_CLIENT_SECRET: 'github-secret',
     // Required: a deterministic 32-byte base64 value so env parse succeeds.
     LLM_ROUTER_MASTER_KEY: Buffer.alloc(32, 0xAA).toString('base64'),
   }
@@ -36,13 +31,11 @@ describe('parseAdditionalTrustedOriginsEnv', () => {
 })
 
 describe('parseEnv', () => {
-  it('parses the required auth and infrastructure environment variables', () => {
+  it('parses the required infrastructure and router environment variables', () => {
     const env = parseEnv(baseEnv())
 
     expect(env.DATABASE_URL).toBe('postgres://example')
     expect(env.REDIS_URL).toBe('redis://example')
-    expect(env.AUTH_UI_URL).toBe('https://accounts.airi.build/ui')
-    expect(env.ADMIN_UI_URL).toBe('https://admin.airi.build')
     expect(env.ADDITIONAL_TRUSTED_ORIGINS).toEqual([])
   })
 
@@ -56,35 +49,6 @@ describe('parseEnv', () => {
       'https://10.0.0.129:5273',
       'https://198.18.0.1:5273',
     ])
-  })
-
-  it('parses TEST_AUTH_TOKEN with default virtual user settings', () => {
-    const env = parseEnv({
-      ...baseEnv(),
-      TEST_AUTH_TOKEN: 'local-test-token',
-    })
-
-    expect(env.TEST_AUTH_TOKEN).toBe('local-test-token')
-    expect(env.TEST_AUTH_USER_ID).toBe('test-user')
-    expect(env.TEST_AUTH_USER_EMAIL).toBe('test@example.com')
-    expect(env.TEST_AUTH_USER_NAME).toBe('Test User')
-    expect(env.TEST_AUTH_USER_ROLE).toBe('')
-  })
-
-  it('parses TEST_AUTH_TOKEN virtual user overrides', () => {
-    const env = parseEnv({
-      ...baseEnv(),
-      TEST_AUTH_TOKEN: 'local-test-token',
-      TEST_AUTH_USER_ID: 'admin-user',
-      TEST_AUTH_USER_EMAIL: 'admin@example.com',
-      TEST_AUTH_USER_NAME: 'Admin User',
-      TEST_AUTH_USER_ROLE: 'admin',
-    })
-
-    expect(env.TEST_AUTH_USER_ID).toBe('admin-user')
-    expect(env.TEST_AUTH_USER_EMAIL).toBe('admin@example.com')
-    expect(env.TEST_AUTH_USER_NAME).toBe('Admin User')
-    expect(env.TEST_AUTH_USER_ROLE).toBe('admin')
   })
 
   it('lLM_ROUTER_MASTER_KEY decodes a valid 32-byte base64 value into a Buffer', () => {

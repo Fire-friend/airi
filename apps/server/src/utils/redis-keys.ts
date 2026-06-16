@@ -17,14 +17,6 @@ export function configRedisKey(key: string): string {
   return redisKeyFrom('config', key)
 }
 
-export function userFluxRedisKey(userId: string): string {
-  return redisKeyFrom('user', userId, 'flux')
-}
-
-export function userFluxMeterDebtRedisKey(userId: string, meterName: string): string {
-  return redisKeyFrom('user', userId, 'flux-meter', meterName, 'debt')
-}
-
 export function userChatBroadcastRedisKey(userId: string): string {
   return redisKeyFrom('user', userId, 'chat', 'broadcast')
 }

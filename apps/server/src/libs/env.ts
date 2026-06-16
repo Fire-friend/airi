@@ -9,7 +9,7 @@ import { check, integer, maxValue, minValue, nonEmpty, object, optional, parse, 
 
 /**
  * Parses `ADDITIONAL_TRUSTED_ORIGINS`: comma-separated absolute origins used for
- * CORS (`/api/*`) and request-derived trusted bases (e.g. Stripe return URLs).
+ * CORS (`/api/*`) and request-derived trusted bases.
  * Each segment is normalized via `URL.origin` so trailing slashes are stripped.
  *
  * Before:
@@ -80,23 +80,6 @@ const EnvSchema = object({
 
   API_SERVER_URL: optional(string(), 'http://localhost:3000'),
 
-  // Standalone auth UI base URL. The server keeps `/auth/*` as the historical
-  // entrypoint and redirects those requests here after ui-server-auth moved out
-  // of the server image.
-  AUTH_UI_URL: optional(string(), 'https://accounts.airi.build/ui'),
-
-  // Standalone admin UI base URL. The server keeps `/admin/*` as the historical
-  // entrypoint and redirects those requests here after ui-admin moved out of
-  // the server image.
-  ADMIN_UI_URL: optional(string(), 'https://admin.airi.build'),
-
-  // Canonical user-facing web app origin. Used as the Stripe redirect base
-  // (success_url / cancel_url / portal return_url) when a request has no trusted
-  // browser origin — notably the Electron desktop renderer, which loads from
-  // file:// and sends no usable web origin. Web/mobile requests keep returning to
-  // their own origin; only origin-less clients fall back to this.
-  WEB_APP_URL: optional(string(), 'https://airi.moeru.ai'),
-
   // Comma-separated exact origins (e.g. Capacitor dev server `https://10.x:5273`).
   // Prefer this over broad private-IP regex heuristics in production-like configs.
   ADDITIONAL_TRUSTED_ORIGINS: optional(
@@ -109,37 +92,6 @@ const EnvSchema = object({
 
   DATABASE_URL: pipe(string(), nonEmpty('DATABASE_URL is required')),
   REDIS_URL: pipe(string(), nonEmpty('REDIS_URL is required')),
-
-  // Required: signs session cookies and encrypts JWKS private keys in DB.
-  // Must be stable across deploys/instances, otherwise every redeploy invalidates
-  // all existing sessions and forces users to re-login.
-  BETTER_AUTH_SECRET: pipe(string(), nonEmpty('BETTER_AUTH_SECRET is required')),
-
-  AUTH_GOOGLE_CLIENT_ID: pipe(string(), nonEmpty('AUTH_GOOGLE_CLIENT_ID is required')),
-  AUTH_GOOGLE_CLIENT_SECRET: pipe(string(), nonEmpty('AUTH_GOOGLE_CLIENT_SECRET is required')),
-  AUTH_GITHUB_CLIENT_ID: pipe(string(), nonEmpty('AUTH_GITHUB_CLIENT_ID is required')),
-  AUTH_GITHUB_CLIENT_SECRET: pipe(string(), nonEmpty('AUTH_GITHUB_CLIENT_SECRET is required')),
-
-  // Testing-only bearer token bypass. Keep unset in production. When set,
-  // Authorization: Bearer $TEST_AUTH_TOKEN resolves to the virtual user below
-  // through resolveRequestAuth without creating a better-auth session row.
-  TEST_AUTH_TOKEN: optional(string(), ''),
-  TEST_AUTH_USER_ID: optional(pipe(string(), nonEmpty('TEST_AUTH_USER_ID must not be empty when set')), 'test-user'),
-  TEST_AUTH_USER_EMAIL: optional(pipe(string(), nonEmpty('TEST_AUTH_USER_EMAIL must not be empty when set')), 'test@example.com'),
-  TEST_AUTH_USER_NAME: optional(pipe(string(), nonEmpty('TEST_AUTH_USER_NAME must not be empty when set')), 'Test User'),
-  TEST_AUTH_USER_ROLE: optional(string(), ''),
-
-  // Resend transactional email. RESEND_API_KEY required when emailAndPassword
-  // sign-up / forgot-password / change-email / magic-link is exercised. Service
-  // boots without it but those flows will throw at send-time.
-  RESEND_API_KEY: optional(string(), ''),
-  // From address must be a verified Resend sender (e.g. `noreply@your-domain`).
-  RESEND_FROM_EMAIL: optional(string(), 'noreply@airi.moeru.ai'),
-  // Optional friendly name; rendered as `Name <email>` per Resend's RFC 5322 display-name format.
-  RESEND_FROM_NAME: optional(string(), 'Project AIRI'),
-
-  STRIPE_SECRET_KEY: optional(string()),
-  STRIPE_WEBHOOK_SECRET: optional(string()),
 
   // LLM/TTS gateway is fully internalised by the in-process router; provider
   // baseURLs live per-upstream inside LLM_ROUTER_CONFIG, and the default chat /
@@ -182,13 +134,6 @@ const EnvSchema = object({
   OTEL_EXPORTER_OTLP_ENDPOINT: optional(string()),
   OTEL_EXPORTER_OTLP_HEADERS: optional(string()),
   OTEL_DEBUG: optional(string()),
-  // Admin allowlist for /api/admin/* routes. Comma-separated email addresses.
-  // Match is case-insensitive, but the user must also have `email_verified = true`
-  // — otherwise an attacker could register a fresh account with the admin email
-  // before verification and slip past the check.
-  // Empty (default) = no one is admin — production safe by default.
-  // Example: ADMIN_EMAILS=alice@example.com,bob@example.com
-  ADMIN_EMAILS: optional(string(), ''),
 })
 
 export type Env = InferOutput<typeof EnvSchema>

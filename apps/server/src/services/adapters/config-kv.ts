@@ -119,20 +119,6 @@ export const llmRouterConfigSchema = object({
  * - Redis serialization/deserialization shape
  */
 const ConfigEntrySchemas = {
-  FLUX_PER_REQUEST: optional(number(), 5),
-  INITIAL_USER_FLUX: optional(number(), 0),
-  FLUX_PER_1K_TOKENS: optional(number(), 1),
-  FLUX_PER_1K_CHARS_TTS: number(),
-  // Debt-ledger TTL: residual TTS chars below 1 Flux are forgiven on expiry.
-  // 24h gives users a long-enough window for accumulated dust to settle naturally.
-  TTS_DEBT_TTL_SECONDS: optional(number(), 86400),
-  AUTH_RATE_LIMIT_MAX: optional(number(), 20),
-  AUTH_RATE_LIMIT_WINDOW_SEC: optional(number(), 60),
-  // No default — absent means top-up is not available yet
-  STRIPE_FLUX_PRODUCT_ID: optional(string()),
-  // No default — absent lets Stripe auto-select payment methods via Dashboard config
-  STRIPE_PAYMENT_METHODS: optional(array(string())),
-  STRIPE_PAYMENT_METHOD_OPTIONS: optional(record(string(), any()), {}),
   // model id → (BCP-47 locale → recommended voice id). Outer key is either a
   // router TTS model id (LLM_ROUTER_CONFIG.tts.models key) for REST or a
   // streaming api_resource_id (e.g. `seed-tts-2.0`) for the streaming surface.

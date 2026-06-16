@@ -95,8 +95,8 @@ export interface LlmRouteRequest {
 
 /**
  * Auxiliary context shape kept alongside one `route()` invocation. Not part
- * of the public input — exists so future billing-attribution work can thread
- * userId / billing tags through without changing the call signature.
+ * of the public input; it carries bounded routing facts for logging, metrics,
+ * and fallback decisions without exposing upstream response bodies.
  *
  * Per SEC-5: upstream response bodies must never enter this shape. Only
  * status codes (or `'timeout'`) and counts are safe to carry.

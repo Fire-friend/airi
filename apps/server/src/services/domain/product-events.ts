@@ -9,14 +9,12 @@ import * as schema from '../../schemas/product-events'
 
 const logger = useLogger('product-events')
 
-export type ProductFeature = 'auth' | 'chat' | 'gen_ai_chat' | 'tts' | 'billing' | 'voice_pack'
+export type ProductFeature = 'chat' | 'gen_ai_chat' | 'tts' | 'voice_pack'
 
 export type ProductEventStatus = 'started' | 'succeeded' | 'failed' | 'blocked'
 
 export type ProductAction
-  = | 'user_signed_up'
-    | 'session_started'
-    | 'message_pushed'
+  = | 'message_pushed'
     | 'completion_requested'
     | 'completion_succeeded'
     | 'completion_failed'
@@ -27,14 +25,12 @@ export type ProductAction
     | 'voice_pack_created'
     | 'voice_pack_updated'
     | 'voice_pack_disabled'
-    | 'checkout_started'
-    | 'payment_completed'
 
 /**
  * Product event fact written to AIRI's own Postgres analytics table.
  */
 export interface ProductEventInput {
-  /** Better Auth user id. Kept in Postgres only; never emitted as a Prometheus label. */
+  /** Request actor id. Kept in Postgres only; never emitted as a Prometheus label. */
   userId: string
   /** Bounded product area used for product dashboards and funnels. */
   feature: ProductFeature

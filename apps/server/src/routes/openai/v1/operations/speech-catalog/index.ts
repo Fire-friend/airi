@@ -45,7 +45,7 @@ export function createSpeechCatalogOperation(deps: V1RouteDeps): SpeechCatalogOp
     const voices = await deps.llmRouter.listTtsVoices(model)
     const recommended = (await deps.configKV.getOptional('DEFAULT_TTS_VOICES'))?.[model] ?? {}
     // Debug level: high-frequency catalog poll from UI selectors, no
-    // billing / user-facing side effect — useful only when debugging
+    // user-facing side effect — useful only when debugging
     // voice-picker drift, never as a permanent audit trail line.
     logger.withFields({ model, voiceCount: voices.length }).debug('list tts voices')
     return Response.json({ voices, recommended })

@@ -22,8 +22,8 @@ interface RateLimitOptions {
    */
   metrics?: RateLimitMetrics | null
   /**
-   * Stable label for the route this limiter guards (e.g. `auth.api`,
-   * `openai.completions`, `stripe.checkout`). Avoids high-cardinality URL
+   * Stable label for the route this limiter guards (e.g.
+   * `openai.completions`). Avoids high-cardinality URL
    * paths in metric labels.
    */
   routeLabel?: string

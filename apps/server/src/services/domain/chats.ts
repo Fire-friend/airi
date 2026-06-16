@@ -330,8 +330,8 @@ export function createChatService(db: Database, metrics?: EngagementMetrics | nu
      *   **kept intact** — deleting them would corrupt the conversation
      *   context for remaining members ("B replied to nothing"). Sender
      *   anonymization is automatic: `messages.senderId` is bare text with
-     *   no FK, so after better-auth hard-deletes the user row, the senderId
-     *   string still groups the user's messages together but cannot be
+     *   no FK, so after a legacy account cleanup removes the user row, the
+     *   senderId string still groups the user's messages together but cannot be
      *   joined to any PII (name / email are gone with the user row). The
      *   UI is expected to render `senderId` whose user lookup misses as
      *   "Deleted User".
@@ -402,7 +402,7 @@ export function createChatService(db: Database, metrics?: EngagementMetrics | nu
         // Count (do not mutate) the user's messages in shared chats to make
         // the preservation visible in logs. These rows stay live so other
         // members keep their conversation context; sender anonymizes itself
-        // once better-auth hard-deletes the user row.
+        // once legacy account cleanup removes the user row.
         const kept = await db.select({ id: schema.messages.id })
           .from(schema.messages)
           .where(and(

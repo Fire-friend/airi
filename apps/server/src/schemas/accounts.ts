@@ -7,24 +7,13 @@ export const user = pgTable('user', {
   email: text('email').notNull().unique(),
   emailVerified: boolean('email_verified').default(false).notNull(),
   image: text('image'),
-  // better-auth `admin` plugin fields. Field names must match the plugin's
-  // schema (role/banned/banReason/banExpires) so its drizzle adapter resolves
-  // them. `role` gates /admin/* (role === 'admin'); `banned` is enforced by the
-  // plugin at session.create.before AND re-checked on the OIDC JWT hot path
-  // (resolveRequestAuth / userinfo guard). Roles are granted out-of-band
-  // (manual DB update) — there is no env allowlist anymore.
+  // Legacy account fields kept so existing databases can still load the schema.
+  // Runtime auth and admin access control no longer use these columns.
   role: text('role'),
   banned: boolean('banned').default(false),
   banReason: text('ban_reason'),
   banExpires: timestamp('ban_expires'),
-  // NOTICE:
-  // Touched in `databaseHooks.session.create.after` (see auth.ts) which
-  // fires on sign-in AND on every OIDC access-token refresh (~hourly), so
-  // this is effectively "last activity" for any user with a live client.
-  // Better Auth has `session.updatedAt` but that's per-session-row; we
-  // want one stable per-user timestamp for DAU-style queries without
-  // joining/aggregating session rows. Nullable so existing rows backfill
-  // lazily on next login instead of needing a migration-time seed.
+  // Legacy activity timestamp retained for schema compatibility.
   lastSeenAt: timestamp('last_seen_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at')
@@ -48,9 +37,7 @@ export const session = pgTable(
     userId: text('user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
-    // better-auth `admin` plugin: set when this session is an admin
-    // impersonating the user. Impersonation endpoints are disabled via
-    // disabledPaths, but the column stays so the schema matches the plugin.
+    // Legacy impersonation column retained for schema compatibility.
     impersonatedBy: text('impersonated_by'),
   },
   table => [index('session_userId_idx').on(table.userId)],

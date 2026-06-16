@@ -14,8 +14,7 @@ import {
 // replicas and overshoot the cap, so the check + increment happen inside one Lua
 // script. The EXPIRE bounds leakage: if a replica crashes between acquire and
 // release, the counter self-heals after `inflightTtlSeconds` instead of pinning
-// the pool as permanently full. Source: flux-meter.ts ACCUMULATE_SCRIPT (same
-// "INCR + EXPIRE, TTL survives crash" shape).
+// the pool as permanently full.
 const ACQUIRE_SCRIPT = `
 local inflightKey = KEYS[1]
 local knownKey = KEYS[2]
@@ -58,8 +57,8 @@ return 0
  *   releases it once the attempt finishes.
  *
  * Expects:
- * - `redis` is the shared cluster Redis (the same instance the flux meter and
- *   config cache use). Counts are cluster-wide, not per-process.
+ * - `redis` is the shared cluster Redis. Counts are cluster-wide, not
+ *   per-process.
  *
  * Returns:
  * - An acquire/release/saturation API. `tryAcquire` is the only capacity

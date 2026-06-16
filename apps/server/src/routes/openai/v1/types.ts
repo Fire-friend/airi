@@ -1,8 +1,6 @@
-import type { GenAiMetrics, RateLimitMetrics, RevenueMetrics } from '../../../otel'
+import type { GenAiMetrics, RateLimitMetrics } from '../../../otel'
 import type { ConfigKVService } from '../../../services/adapters/config-kv'
-import type { BillingService } from '../../../services/domain/billing/billing-service'
-import type { FluxMeter } from '../../../services/domain/billing/flux-meter'
-import type { FluxService } from '../../../services/domain/flux'
+import type { CharacterService } from '../../../services/domain/characters'
 import type { LlmRouterService } from '../../../services/domain/llm-router'
 import type { ChatGenerationTrace, TtsGenerationTrace } from '../../../services/domain/llm-tracing'
 import type { ProductEventService } from '../../../services/domain/product-events'
@@ -17,16 +15,13 @@ export interface LlmTracingDeps {
 }
 
 export interface V1RouteDeps {
-  fluxService: FluxService
-  billingService: BillingService
+  characterService: CharacterService
   configKV: ConfigKVService
   requestLogService: RequestLogService
   productEventService: ProductEventService
-  ttsMeter: FluxMeter
   llmRouter: LlmRouterService
   voicePackService: VoicePackService
   genAi?: GenAiMetrics | null
-  revenue?: RevenueMetrics | null
   rateLimitMetrics?: RateLimitMetrics | null
   llmTracing: LlmTracingDeps
 }

@@ -1,7 +1,6 @@
 import type { WSContext } from 'hono/ws'
 import type { RawData } from 'ws'
 
-import type { FluxService } from '../../services/domain/flux'
 import type { AudioSpeechWsHandlersOptions } from './types'
 
 import { Buffer } from 'node:buffer'
@@ -9,12 +8,9 @@ import { Buffer } from 'node:buffer'
 import WebSocket from 'ws'
 
 import { useLogger } from '@guiiai/logg'
-import { context as otelContext, SpanStatusCode, trace } from '@opentelemetry/api'
+import { SpanStatusCode, trace } from '@opentelemetry/api'
 
-import { ApiError } from '../../utils/error'
-import { nanoid } from '../../utils/id'
 import {
-  AIRI_ATTR_BILLING_FLUX_CONSUMED,
   AIRI_ATTR_GEN_AI_GATEWAY_KEY_ID,
   AIRI_ATTR_GEN_AI_GATEWAY_UPSTREAM_URL,
   AIRI_ATTR_GEN_AI_OPERATION_KIND,
@@ -23,14 +19,6 @@ import {
 import { bufferToString, readUsageChars, toBufferLike } from './protocol'
 
 const log = useLogger('audio-speech-ws').useGlobalConfig()
-
-/**
- * Conservative pre-flight estimate: assume the worst-case streaming session
- * synthesises ~2k input chars before billing materialises. Users below this
- * affordability threshold are refused before the upstream ws is dialed —
- * mirrors the pre-flight pattern at /audio/speech (handleTTS).
- */
-const STREAMING_PREFLIGHT_CHARS_ESTIMATE = 2000
 
 const STREAM_MODEL_LABEL_FALLBACK = 'streaming-tts'
 
@@ -42,7 +30,7 @@ const tracer = trace.getTracer('audio-speech-ws')
 export interface AudioSpeechSessionState {
   /** Stores the accepted client websocket. */
   attachClient: (ws: WSContext) => void
-  /** Reads config, checks balance, decrypts the upstream key, and dials upstream. */
+  /** Reads config, decrypts the upstream key, and dials upstream. */
   dialUpstream: () => Promise<void>
   /** Forwards a client frame or queues it while the upstream connection opens. */
   handleClientMessage: (message: { data: unknown }, ws: WSContext) => void
@@ -62,9 +50,9 @@ export interface AudioSpeechSessionAnalytics {
  * Creates the per-connection streaming speech state machine.
  *
  * Use when:
- * - A Hono websocket connection has been accepted for a verified user.
- * - Client frames must be proxied to unSpeech while billing and request logs
- *   are handled at session end.
+ * - A Hono websocket connection has been accepted.
+ * - Client frames must be proxied to unSpeech while request logs are handled at
+ *   session end.
  *
  * Expects:
  * - `UNSPEECH_UPSTREAM.streaming` has a base URL and at least one encrypted key.
@@ -77,7 +65,6 @@ export function createSessionState(
   opts: AudioSpeechWsHandlersOptions,
   analyticsInput: AudioSpeechSessionAnalytics = {},
 ): AudioSpeechSessionState {
-  const requestId = nanoid()
   const startedAt = Date.now()
   const analytics = normalizeAnalytics(analyticsInput)
   const span = tracer.startSpan('llm.gateway.tts.stream', {
@@ -90,7 +77,7 @@ export function createSessionState(
   let upstreamWs: WebSocket | null = null
   let upstreamReady = false
   let closed = false
-  let billed = false
+  let logged = false
   let totalInputChars = 0
   let modelLabel = STREAM_MODEL_LABEL_FALLBACK
   /**
@@ -130,24 +117,6 @@ export function createSessionState(
     const upstreamConfig = unspeech?.streaming
     if (!upstreamConfig || !upstreamConfig.baseURL || upstreamConfig.keys.length === 0) {
       closeWithError(1008, 'streaming_tts_not_configured')
-      return
-    }
-
-    // Pre-flight balance check: refuse before dialing if the user cannot
-    // afford the worst-case session.
-    try {
-      const flux = await opts.fluxService.getFlux(userId)
-      await opts.ttsMeter.assertCanAfford(userId, STREAMING_PREFLIGHT_CHARS_ESTIMATE, flux.flux)
-    }
-    catch (err) {
-      log.withError(err).withFields({ userId }).warn('pre-flight rejected streaming tts')
-      // assertCanAfford throws PaymentRequiredError (402) — translate to ws
-      // policy-violation close. The client can read the close code/reason to
-      // surface a 'top up' prompt.
-      if (isPaymentRequiredError(err))
-        closeWithBlockedPreflight(1008, 'insufficient_flux')
-      else
-        closeWithError(1011, 'flux_preflight_failed')
       return
     }
 
@@ -254,7 +223,7 @@ export function createSessionState(
           ? Buffer.from(message.data)
           : Buffer.from(message.data as ArrayBufferLike)
 
-    // Sniff input chars from text frames so billing has a fallback when
+    // Sniff input chars from text frames so request logs have a fallback when
     // upstream usage.text_words is absent. Only the `text` event contributes;
     // start/finish/cancel do not.
     if (!isBinary && typeof payload === 'string') {
@@ -332,9 +301,9 @@ export function createSessionState(
         // Pull authoritative usage from upstream when present. Falls back to
         // the client-text-frame estimate accumulated in handleClientMessage.
         const usageChars = readUsageChars(evt.payload)
-        const billUnits = usageChars ?? totalInputChars
-        if (billUnits > 0)
-          void billSession(billUnits, 'session.finished')
+        const usageUnits = usageChars ?? totalInputChars
+        if (usageUnits > 0)
+          void completeSession(usageUnits)
         else
           finalize()
         break
@@ -364,48 +333,16 @@ export function createSessionState(
       }
     }
     catch {
-      // Non-JSON text frame from client — ignore for billing, will fail
+      // Non-JSON text frame from client — ignore for accounting, will fail
       // upstream-side anyway.
     }
   }
 
-  async function billSession(units: number, reason: string) {
-    if (billed)
+  async function completeSession(units: number) {
+    if (logged)
       return
-    billed = true
+    logged = true
     span.setAttribute(GEN_AI_ATTR_REQUEST_MODEL, modelLabel)
-
-    let flux: Awaited<ReturnType<FluxService['getFlux']>>
-    try {
-      flux = await opts.fluxService.getFlux(userId)
-    }
-    catch (err) {
-      log.withError(err).withFields({ userId }).warn('flux read failed at session end')
-      finalize()
-      return
-    }
-
-    let fluxConsumed = 0
-    try {
-      const result = await otelContext.with(trace.setSpan(otelContext.active(), span), () =>
-        opts.ttsMeter.accumulate({
-          userId,
-          units,
-          currentBalance: flux.flux,
-          requestId,
-          metadata: { model: modelLabel },
-        }))
-      fluxConsumed = result.fluxDebited
-      span.setAttribute(AIRI_ATTR_BILLING_FLUX_CONSUMED, fluxConsumed)
-    }
-    catch (err) {
-      // Billing failure is surfaced but does not retroactively reject the
-      // already-delivered audio — the user got the audio, the meter retains
-      // the debt for the next request to settle (per FluxMeter rollback path).
-      log.withError(err).withFields({ userId, units, reason }).error('billing accumulate failed for streaming tts')
-      span.recordException(err as Error)
-      span.setStatus({ code: SpanStatusCode.ERROR, message: 'billing_failed' })
-    }
 
     const durationMs = Date.now() - startedAt
     try {
@@ -414,7 +351,7 @@ export function createSessionState(
         model: modelLabel,
         status: 200,
         durationMs,
-        fluxConsumed,
+        fluxConsumed: 0,
       })
     }
     catch (err) {
@@ -431,7 +368,6 @@ export function createSessionState(
       metadata: {
         input_chars: units,
         duration_ms: durationMs,
-        flux_consumed: fluxConsumed,
         trigger: analytics.trigger,
       },
     })
@@ -486,39 +422,6 @@ export function createSessionState(
     span.end()
   }
 
-  function closeWithBlockedPreflight(code: number, reason: string) {
-    if (closed)
-      return
-    void opts.productEventService.track({
-      userId,
-      feature: 'tts',
-      action: 'speech_blocked',
-      status: 'blocked',
-      source: analytics.source,
-      model: modelLabel,
-      reason: 'insufficient_balance',
-      metadata: {
-        balance_state: 'insufficient',
-        billing_units: STREAMING_PREFLIGHT_CHARS_ESTIMATE,
-        close_code: code,
-        duration_ms: Date.now() - startedAt,
-        trigger: analytics.trigger,
-      },
-    })
-    if (clientWs) {
-      try {
-        clientWs.send(JSON.stringify({ event: 'error', code: reason, message: reason }))
-      }
-      catch {}
-      try {
-        clientWs.close(code, reason)
-      }
-      catch {}
-    }
-    closed = true
-    span.end()
-  }
-
   return {
     attachClient,
     dialUpstream,
@@ -548,13 +451,4 @@ function normalizeSource(source: AudioSpeechSessionAnalytics['source']): Streami
     default:
       return 'audio.speech.ws'
   }
-}
-
-function isPaymentRequiredError(err: unknown): boolean {
-  if (err instanceof ApiError)
-    return err.statusCode === 402
-  return typeof err === 'object'
-    && err != null
-    && 'statusCode' in err
-    && (err as { statusCode?: unknown }).statusCode === 402
 }

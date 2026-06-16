@@ -5,24 +5,22 @@ import {
   lockRedisKey,
   redisKeyFrom,
   userChatBroadcastRedisKey,
-  userFluxRedisKey,
 } from '../redis-keys'
 
 describe('redis key utils', () => {
   it('builds colon-separated keys from normalized segments', () => {
-    expect(redisKeyFrom('user', '123', 'flux')).toBe('user:123:flux')
+    expect(redisKeyFrom('user', '123', 'chat')).toBe('user:123:chat')
     expect(redisKeyFrom(' lock ', 42, ' job ')).toBe('lock:42:job')
   })
 
   it('rejects empty key definitions', () => {
     expect(() => redisKeyFrom()).toThrow('Redis keys must contain at least one segment')
-    expect(() => redisKeyFrom('user', '   ', 'flux')).toThrow('Redis key segments must not be empty')
+    expect(() => redisKeyFrom('user', '   ', 'chat')).toThrow('Redis key segments must not be empty')
   })
 
   it('exposes stable helpers for config, user, and lock namespaces', () => {
-    expect(configRedisKey('FLUX_PER_REQUEST')).toBe('config:FLUX_PER_REQUEST')
-    expect(userFluxRedisKey('user-1')).toBe('user:user-1:flux')
+    expect(configRedisKey('DEFAULT_CHAT_MODEL')).toBe('config:DEFAULT_CHAT_MODEL')
     expect(userChatBroadcastRedisKey('user-1')).toBe('user:user-1:chat:broadcast')
-    expect(lockRedisKey('user', 'user-1', 'flux')).toBe('lock:user:user-1:flux')
+    expect(lockRedisKey('config', 'LLM_ROUTER_CONFIG')).toBe('lock:config:LLM_ROUTER_CONFIG')
   })
 })

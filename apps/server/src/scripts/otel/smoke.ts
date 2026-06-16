@@ -3,10 +3,9 @@
  *
  * Verifies every Counter created by `initOtel` is primed (.add(0)) so the
  * Prometheus exporter sees the time series at boot, not just after the first
- * real event. Without priming, low-traffic counters
- * (auth_failures_total, stripe_*_total, payment_failed, ...) never appear in
- * Grafana until an event happens — making panels look broken on fresh deploys
- * and absence-based alerts impossible to author.
+ * real event. Without priming, low-traffic counters never appear in Grafana
+ * until an event happens — making panels look broken on fresh deploys and
+ * absence-based alerts impossible to author.
  *
  * Histograms (gen_ai.client.first_token.duration, airi.email.duration, ...)
  * are intentionally NOT in the output — they only register on first .record().
@@ -34,11 +33,6 @@ metrics.setGlobalMeterProvider(provider)
 // flush via the in-memory reader.
 env.DATABASE_URL ??= 'postgres://test'
 env.REDIS_URL ??= 'redis://test'
-env.BETTER_AUTH_SECRET ??= 'test'
-env.AUTH_GOOGLE_CLIENT_ID ??= 'test'
-env.AUTH_GOOGLE_CLIENT_SECRET ??= 'test'
-env.AUTH_GITHUB_CLIENT_ID ??= 'test'
-env.AUTH_GITHUB_CLIENT_SECRET ??= 'test'
 // 32 deterministic bytes is enough to satisfy env validation; the smoke
 // script never actually hits the router.
 env.LLM_ROUTER_MASTER_KEY ??= Buffer.alloc(32, 0xAA).toString('base64')
