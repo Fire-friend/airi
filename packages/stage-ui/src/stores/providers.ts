@@ -2762,16 +2762,23 @@ export const useProvidersStore = defineStore('providers', () => {
     return providers
   }, [])
 
+  // The "official-provider*" entries were the hosted, paid AIRI cloud offering
+  // that required an account and Flux credits. Accounts and billing were
+  // removed, so they must not surface in the provider catalogue anymore. Their
+  // registry definitions are kept inert (never configured) to avoid a large
+  // cross-module refactor; this single predicate is what hides them from UI.
+  const isOfficialProviderId = (id: string) => id.startsWith('official-provider')
+
   const allChatProvidersMetadata = computed(() => {
-    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'chat')
+    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'chat' && !isOfficialProviderId(metadata.id))
   })
 
   const allAudioSpeechProvidersMetadata = computed(() => {
-    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'speech')
+    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'speech' && !isOfficialProviderId(metadata.id))
   })
 
   const allAudioTranscriptionProvidersMetadata = computed(() => {
-    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'transcription')
+    return availableProvidersMetadata.value.filter(metadata => metadata.category === 'transcription' && !isOfficialProviderId(metadata.id))
   })
 
   const configuredChatProvidersMetadata = computed(() => {
