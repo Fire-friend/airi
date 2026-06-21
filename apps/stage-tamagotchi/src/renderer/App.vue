@@ -48,7 +48,6 @@ import {
   electronPluginSetEnabled,
   electronPluginUnload,
 } from '../shared/eventa/plugin/host'
-import { initializeElectronAuthCallbackBridge } from './bridges/electron-auth-callback'
 import { initializeScreenObservationBridge } from './bridges/screen-observation'
 import { initializeStageThreeRuntimeTraceBridge } from './bridges/stage-three-runtime-trace'
 import { useLanguage } from './composables/use-language'
@@ -82,7 +81,6 @@ const { activeProvider, artistryGlobals, activeModel, defaultPromptPrefix, provi
 const context = useElectronEventaContext()
 usePerfTracerBridgeStore()
 initializeStageThreeRuntimeTraceBridge()
-initializeElectronAuthCallbackBridge()
 initializeScreenObservationBridge({ router })
 void stageWindowLifecycleStore.initializeWindowLifecycleBridge()
 const getServerChannelConfig = useElectronEventaInvoke(electronGetServerChannelConfig)

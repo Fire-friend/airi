@@ -28,7 +28,6 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useSettingsLive2d } from '../../../../stage-ui-live2d/src/composables/live2d/live2d'
-import { useAuthProviderSync } from '../../composables/use-auth-provider-sync'
 import { useDuckDb } from '../../composables/use-duck-db'
 import { useIOTraceBridge } from '../../composables/use-io-trace-bridge'
 import { initIOTracer } from '../../composables/use-io-tracer'
@@ -100,7 +99,6 @@ const chatHookCleanups: Array<() => void> = []
 //             cross-window broadcast wiring.
 
 const providersStore = useProvidersStore()
-useAuthProviderSync()
 const live2dStore = useLive2dParams()
 const showStage = ref(true)
 const viewUpdateCleanups: Array<() => void> = []
